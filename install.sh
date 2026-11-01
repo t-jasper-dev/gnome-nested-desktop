@@ -515,6 +515,8 @@ Steam-Starter:
   Desktop-Eintrag: $APP_DIR/steam.desktop
   Läuft Steam bereits im Desktop Mode, wird es nicht automatisch beendet.
   Zum Wechsel: steam -shutdown, danach Steam neu starten.
+  Der Starter aktiviert das gamescope-Fenster, damit die Tastatur am PC
+  (Shift+Tab fürs Steam-Overlay) bei Steam ankommt.
   Abschalten: ./install.sh --no-steam-gamemode
 EOF
 fi

@@ -67,4 +67,34 @@ case "$gs_size" in
 esac
 
 echo "--- steam-gamemode: gamescope ${gs_args[*]} -- $STEAM_BIN -gamepadui $*" >&2
-exec gamescope "${gs_args[@]}" -- "$STEAM_BIN" -gamepadui "$@"
+gamescope "${gs_args[@]}" -- "$STEAM_BIN" -gamepadui "$@" &
+gs_pid=$!
+
+cleanup() {
+    kill "$gs_pid" 2>/dev/null
+}
+trap cleanup INT TERM HUP
+
+# Das gamescope-Fenster fordert den Fokus nicht zuverlässig an, wenn es aus
+# einem Desktop-Eintrag heraus gestartet wird. Dann landet die Tastatur am PC
+# in der äußeren GNOME-Shell und Shift+Tab erreicht Steam nicht. Fenster nach
+# dem Start einmal aktivieren; danach bleibt der Fokus bei gamescope.
+if [ -n "${DISPLAY:-}" ] && command -v xdotool >/dev/null 2>&1; then
+    (
+        for _ in $(seq 1 40); do
+            wid=$(xdotool search --pid "$gs_pid" --class gamescope 2>/dev/null | tail -n1)
+            if [ -n "$wid" ]; then
+                xdotool windowactivate "$wid" 2>/dev/null && break
+            fi
+            sleep 0.25
+        done
+    ) &
+    focus_pid=$!
+else
+    focus_pid=
+fi
+
+wait "$gs_pid"
+status=$?
+[ -n "${focus_pid:-}" ] && kill "$focus_pid" 2>/dev/null
+exit "$status"

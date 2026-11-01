@@ -247,6 +247,11 @@ kann.
 - In einer echten Gaming-Mode-Sitzung erkennt der Starter das vorhandene
   gamescope und startet Steam ohne weitere Verschachtelung.
 - Ohne gamescope startet Steam normal im Desktop Mode.
+- Der Starter aktiviert das gamescope-Fenster nach dem Start. Das ist wichtig,
+  wenn die Tastatur direkt am PC benutzt wird: Ohne Fokus landet `Shift+Tab` in
+  der äußeren GNOME-Shell und das Steam-Overlay öffnet nicht. Alternativ den
+  Steam-Button im Steam-Link-Client verwenden. Geht der Fokus später verloren,
+  einmal in das gamescope-Fenster klicken.
 - Abschalten und den systemweiten Eintrag wiederherstellen:
   `./install.sh --no-steam-gamemode`
 - Kleinere Ausgabegröße fürs Streaming:
