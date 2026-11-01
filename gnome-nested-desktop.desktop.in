@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=GNOME (verschachtelt)
+Name[en]=GNOME (nested)
+Comment=GNOME-Desktop in einem Fenster starten (Mutter Devkit)
+Comment[en]=Run a GNOME desktop inside a window using the Mutter Devkit
+Exec="@HOME@/.local/bin/gnome-nested-desktop"
+Icon=@ICON@
+Terminal=false
+Categories=System;DesktopSettings;
+Keywords=gnome;nested;desktop;devkit;wayland;steam;

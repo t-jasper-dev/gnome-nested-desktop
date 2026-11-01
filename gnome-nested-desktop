@@ -1,0 +1,733 @@
+#!/usr/bin/env bash
+# Verschachtelte GNOME-Shell in einem Fenster (Mutter Devkit).
+#
+# GNOME 49+ hat den alten "nested"-Modus entfernt. Der offizielle Ersatz ist
+# das Mutter Devkit: eine eigene GNOME-Shell-Instanz läuft in einer privaten
+# D-Bus-Session und wird über mutter-devkit in einem Fenster angezeigt.
+#
+# Beenden: Fenster schließen.
+#
+# Optionen (auch als Steam-Startoptionen nutzbar):
+#   --size WxH      Auflösung der verschachtelten Sitzung
+#   --scale N       Skalierung der verschachtelten Sitzung (z. B. 1.25, 2)
+#   --help
+#
+# Entsprechende Umgebungsvariablen: GNOME_NESTED_SIZE, GNOME_NESTED_SCALE,
+# GNOME_NESTED_BACKEND=wayland|x11.
+#
+# Ohne --size wird im Gaming Mode die Auflösung von gamescopes Xwayland
+# übernommen (= das, was Steam/gamescope gerade ausgeben). Ohne --scale wird
+# der Skalierungsfaktor der laufenden GNOME-Sitzung übernommen; im Gaming Mode
+# greift der zuletzt gesehene Wert aus dem Cache. --scale auto lässt GNOME
+# selbst wählen, --scale steam nimmt Steams UI-Faktor (config.vdf,
+# UI -> display -> Current).
+
+set -u
+
+# Adresse der äußeren Session, bevor dbus-run-session eine private startet.
+# In Flatpak/Container zeigt DBUS_SESSION_BUS_ADDRESS auf den Host-Bus-Proxy;
+# dort liegt z. B. die DisplayConfig der laufenden GNOME-Sitzung (Skalierung).
+HOST_BUS="${DBUS_SESSION_BUS_ADDRESS:-unix:path=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}/bus}"
+export HOST_BUS
+
+# In einem Flatpak liegt HOME standardmäßig im Sandbox-Verzeichnis. Der
+# Host-Launcher übergibt das echte Home; damit die Sitzung die echten Dateien
+# und die Steam-/GNOME-Konfiguration sieht.
+if [ -n "${GNOME_NESTED_REAL_HOME:-}" ]; then
+    export HOME="$GNOME_NESTED_REAL_HOME"
+    export XDG_DATA_HOME="$HOME/.local/share"
+    export XDG_CONFIG_HOME="$HOME/.config"
+    export XDG_CACHE_HOME="$HOME/.cache"
+fi
+
+LOG="${XDG_RUNTIME_DIR:-/tmp}/gnome-nested-desktop.log"
+: >"$LOG" 2>/dev/null || LOG="/tmp/gnome-nested-desktop.log"
+exec 2>>"$LOG"
+
+echo "=== $(date -Is) Start" >&2
+
+usage() {
+    cat <<'EOF'
+Aufruf: gnome-nested-desktop [--size WxH] [--scale N|host|auto|steam]
+
+  --size WxH   Auflösung der verschachtelten Sitzung (Standard: Gaming Mode =
+               gamescope-Auflösung, Desktop Mode = Devkit-Standard 1280x800)
+  --scale N      Skalierung, z. B. 1.0, 1.25, 1.3333, 1.6667, 2.0
+                 (wird auf die vom Monitor unterstützten Werte gerundet)
+  --scale host   Standard: Faktor der laufenden GNOME-Sitzung
+  --scale auto   GNOME wählt die Skalierung selbst
+  --scale steam  Faktor übernehmen, den Steam für seine eigene Oberfläche
+                 benutzt (config.vdf), sonst aus der Auflösung abgeleitet
+EOF
+}
+
+SIZE_ARG=""
+SCALE_ARG=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --size=*)  SIZE_ARG="${1#*=}"; shift ;;
+        --scale=*) SCALE_ARG="${1#*=}"; shift ;;
+        --size|--scale)
+            if [ $# -lt 2 ]; then
+                echo "--- Fehlender Wert für $1" >&2
+                exit 2
+            fi
+            case "$1" in
+                --size)  SIZE_ARG="$2" ;;
+                --scale) SCALE_ARG="$2" ;;
+            esac
+            shift 2
+            ;;
+        -h|--help)
+            usage
+            exit 0
+            ;;
+        *)
+            echo "--- ignoriere unbekanntes Argument: $1" >&2
+            shift
+            ;;
+    esac
+done
+
+# Steam startet Shortcuts mit Overlay-/MangoHud-/Gamescope-Variablen. Die würden
+# sich in gnome-shell/mutter-devkit einklinken und die verschachtelte Sitzung stören.
+STEAM_APP="${SteamAppId:-}"
+unset LD_PRELOAD MANGOHUD MANGOHUD_CONFIG SteamAppId SteamGameId \
+      SteamOverlayGameId SteamTenfoot SteamEnv ENABLE_GAMESCOPE_WSI 2>/dev/null
+
+# GTK4 nutzt unter gamescope standardmäßig Vulkan. Die Gamescope-WSI-Anbindung
+# scheitert dort (VK_ERROR_SURFACE_LOST_KHR) und das Fenster bleibt schwarz.
+# Der GL-Renderer funktioniert in beiden Modi.
+export GSK_RENDERER="${GSK_RENDERER:-gl}"
+
+# --- Anzeige wählen -----------------------------------------------------------
+# gamescope (Gaming Mode) startet Programme ohne WAYLAND_DISPLAY; die
+# Wayland-Anbindung steckt in GAMESCOPE_WAYLAND_DISPLAY. Im Desktop-Mode gibt
+# es dagegen wayland-0. Ohne Korrektur verbindet sich GTK mit dem falschen
+# Display und das Fenster erscheint gar nicht.
+RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export RUNTIME
+
+have_socket() { [ -n "${1:-}" ] && [ -S "$RUNTIME/$1" ]; }
+
+GAMING=0
+DEVKIT_BACKEND=""
+case "${GNOME_NESTED_BACKEND:-auto}" in
+    x11)
+        DEVKIT_BACKEND=x11
+        unset WAYLAND_DISPLAY
+        ;;
+    wayland)
+        DEVKIT_BACKEND=wayland
+        ;;
+    *)
+        if [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ] || [ "${XDG_CURRENT_DESKTOP:-}" = gamescope ]; then
+            # Gaming Mode: Steam erkennt nur Fenster, die über gamescopes
+            # Xwayland (steamcompmgr) laufen. Ein natives Wayland-Fenster bleibt
+            # für Steam unsichtbar ("WaitingGameWindow", Steam-Logo dreht sich).
+            # GDK_BACKEND gilt nur für das Devkit-Fenster; die Apps in der
+            # verschachtelten Sitzung sollen Wayland nutzen.
+            DEVKIT_BACKEND=x11
+            GAMING=1
+        else
+            # Desktop Mode: natives Wayland-Fenster wie bisher
+            if ! have_socket "${WAYLAND_DISPLAY:-}"; then
+                if have_socket "${GAMESCOPE_WAYLAND_DISPLAY:-}"; then
+                    export WAYLAND_DISPLAY="$GAMESCOPE_WAYLAND_DISPLAY"
+                elif have_socket gamescope-0; then
+                    export WAYLAND_DISPLAY=gamescope-0
+                fi
+            fi
+        fi
+        ;;
+esac
+
+# --- Auflösung ----------------------------------------------------------------
+# Ohne Größenangabe öffnet das Devkit ein 1280x800-Fenster; gamescope skaliert
+# das auf den Bildschirm hoch (unscharf). Im Gaming Mode daher die Auflösung von
+# gamescopes Xwayland übernehmen und das Fenster randlos auf den Schirm legen.
+SIZE="${SIZE_ARG:-${GNOME_NESTED_SIZE:-}}"
+if [ -z "$SIZE" ] && [ "$GAMING" = 1 ] && [ -n "${DISPLAY:-}" ]; then
+    SIZE=$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')
+fi
+case "$SIZE" in
+    "") ;;
+    [0-9]*x[0-9]*) ;;
+    *) echo "--- ungültige Größe '$SIZE', ignoriere" >&2; SIZE="" ;;
+esac
+
+# --- Skalierung ---------------------------------------------------------------
+# Steam gibt die UI-Skalierung nicht an Spiele weiter, schreibt sie aber selbst
+# nach config.vdf: UI -> display -> Current -> (ScaleFactor | AutoScaleFactor).
+# Im Gaming Mode ist das der Faktor der Gamepad-Oberfläche. Zusätzlich steht der
+# tatsächlich an die Webhelper übergebene Wert in logs/webhelper.txt:
+#   ThreadSetForceDeviceScaleFactors 1.000000 * 2.559621 = 2.560000
+# Bevorzugt wird config.vdf (manuell gesetzter ScaleFactor vor AutoScaleFactor),
+# danach der Webhelper-Log, zuletzt die Auflösungs-Heuristik.
+STEAM_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/Steam"
+
+steam_config_get() {
+    local key="$1" cfg="$STEAM_DIR/config/config.vdf"
+    [ -r "$cfg" ] || return 1
+    awk -v want="$key" '
+        /^[[:space:]]*"Current"[[:space:]]*$/ { incur = 1; next }
+        incur && /^[[:space:]]*}[[:space:]]*$/ { incur = 0; next }
+        incur {
+            line = $0
+            if (match(line, /^[[:space:]]*"[^"]*"[[:space:]]*"/)) {
+                key = line
+                sub(/^[[:space:]]*"/, "", key)
+                sub(/".*$/, "", key)
+                if (key == want) {
+                    value = substr(line, RLENGTH + 1)
+                    sub(/"[[:space:]]*$/, "", value)
+                    print value
+                    exit
+                }
+            }
+        }
+    ' "$cfg"
+}
+
+valid_scale() {
+    awk -v v="$1" 'BEGIN {
+        exit !(v ~ /^[0-9]+([.][0-9]+)?$/ && v + 0 >= 0.5 && v + 0 <= 8.0)
+    }'
+}
+
+# Faktor der laufenden GNOME-Sitzung. Im Desktop Mode läuft eine GNOME-Shell,
+# deren DisplayConfig den aktuellen Faktor liefert. Im Gaming Mode läuft keine
+# GNOME-Session; dann greifen der zuletzt gesehene Wert (Cache) und zuletzt
+# monitors.xml.
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/gnome-nested-desktop"
+HOST_SCALE_CACHE="$CACHE_DIR/host-scale"
+
+host_display_scale() {
+    local state scale
+    state=$(DBUS_SESSION_BUS_ADDRESS="$HOST_BUS" gdbus call --session \
+        --dest org.gnome.Mutter.DisplayConfig \
+        --object-path /org/gnome/Mutter/DisplayConfig \
+        --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null) || return 1
+    scale=$(printf "%s\n" "$state" | tr -d " " \
+        | grep -oE "\([-0-9]+,[-0-9]+,[0-9]+([.][0-9]+)?,uint32[0-9]+,true" \
+        | head -n1 | cut -d, -f3)
+    if [ -z "$scale" ]; then
+        scale=$(printf "%s\n" "$state" | tr -d " " \
+            | grep -oE "\([-0-9]+,[-0-9]+,[0-9]+([.][0-9]+)?,uint32[0-9]+" \
+            | head -n1 | cut -d, -f3)
+    fi
+    [ -n "$scale" ] && valid_scale "$scale" || return 1
+    printf "%s\n" "$scale"
+}
+
+cached_host_scale() {
+    local scale
+    [ -r "$HOST_SCALE_CACHE" ] || return 1
+    scale=$(head -n1 "$HOST_SCALE_CACHE" 2>/dev/null)
+    [ -n "$scale" ] && valid_scale "$scale" || return 1
+    printf "%s\n" "$scale"
+}
+
+monitors_xml_scale() {
+    local cfg="${XDG_CONFIG_HOME:-$HOME/.config}/monitors.xml" scale
+    [ -r "$cfg" ] || return 1
+    scale=$(sed -n 's/.*<scale>\([0-9][0-9.]*\)<\/scale>.*/\1/p' "$cfg" | head -n1)
+    [ -n "$scale" ] && valid_scale "$scale" || return 1
+    printf "%s\n" "$scale"
+}
+
+# Prüft, ob ein Steam-Faktor zur Zielauflösung passt. Steam skaliert seine
+# 1280x800-Oberfläche, also gilt Faktor = sqrt((W/1280)*(H/800)) – je nach
+# Underscan auch für 90 % davon. Ein Faktor aus einer anderen Auflösung
+# (z. B. noch von 4K, während 1600x900 getestet wird) wird so verworfen.
+scale_matches_size() {
+    local f="$1" s="$2"
+    [ -n "$f" ] && [ -n "$s" ] || return 1
+    awk -v f="$f" -v s="$s" 'BEGIN {
+        split(s, a, "x")
+        w = a[1] + 0; h = a[2] + 0
+        if (f <= 0 || w <= 0 || h <= 0) exit 1
+        implied = sqrt(f * f * 1280 * 800 * w / h)
+        ratio = (implied > w) ? implied / w : w / implied
+        exit !(ratio <= 1.2)
+    }'
+}
+
+# Wenn Steam die Auflösung selbst im Namen führt (Fullscreen-2560x1440),
+# ist das die verlässlichste Zuordnung.
+steam_name_matches_size() {
+    local name="$1" size="$2"
+    [ -n "$name" ] && [ -n "$size" ] || return 1
+    case "$name" in
+        *"Fullscreen-${size}"*) return 0 ;;
+    esac
+    return 1
+}
+
+steam_config_scale() {
+    local v
+    v=$(steam_config_get "ScaleFactor")
+    if [ -n "$v" ] && valid_scale "$v"; then
+        printf '%s\n' "$v"
+        return 0
+    fi
+    v=$(steam_config_get "AutoScaleFactor")
+    if [ -n "$v" ] && valid_scale "$v"; then
+        printf '%s\n' "$v"
+        return 0
+    fi
+    return 1
+}
+
+steam_log_scale() {
+    local log="$STEAM_DIR/logs/webhelper.txt"
+    [ -r "$log" ] || return 1
+    awk '
+        /ThreadSetForceDeviceScaleFactors/ {
+            ts = $1 " " $2
+            v = 0
+            for (i = 1; i <= NF; i++)
+                if ($i == "*" && i < NF) { v = $(i + 1) + 0; break }
+            if (ts != last_ts) { last_ts = ts; best = 0 }
+            if (v > best) best = v
+        }
+        END { if (best > 0) printf "%.6f\n", best }
+    ' "$log"
+}
+
+# Standardmäßig denselben Faktor wie die laufende GNOME-Sitzung verwenden.
+# "auto" lässt GNOME selbst wählen, "steam" nimmt Steams UI-Faktor, eine Zahl
+# erzwingt ihn.
+DETECTED_HOST_SCALE=$(host_display_scale 2>/dev/null || true)
+if [ -n "$DETECTED_HOST_SCALE" ]; then
+    if mkdir -p "$CACHE_DIR" 2>/dev/null; then
+        printf "%s\n" "$DETECTED_HOST_SCALE" >"$HOST_SCALE_CACHE" 2>/dev/null || true
+    fi
+fi
+
+SCALE_SETTING="${SCALE_ARG:-${GNOME_NESTED_SCALE:-host}}"
+SCALE=""
+SCALE_SOURCE="gnome-auto"
+case "$SCALE_SETTING" in
+    auto) SCALE_SOURCE="gnome-auto" ;;
+    ""|host)
+        if [ -n "$SIZE" ]; then
+            SCALE_SOURCE="host"
+        else
+            SCALE_SOURCE="gnome-auto"
+        fi
+        ;;
+    steam) SCALE_SOURCE="steam" ;;
+    *[!0-9.]*)
+        echo "--- ungültige Skalierung '$SCALE_SETTING', nutze GNOME-Automatik" >&2
+        ;;
+    *)
+        if valid_scale "$SCALE_SETTING"; then
+            SCALE="$SCALE_SETTING"
+            SCALE_SOURCE="argument"
+        else
+            echo "--- Skalierung '$SCALE_SETTING' außerhalb 0.5-8, nutze GNOME-Automatik" >&2
+        fi
+        ;;
+esac
+
+STEAM_SCALE_CFG=""
+STEAM_SCALE_LOG=""
+STEAM_DISPLAY_NAME=""
+
+if [ "$SCALE_SOURCE" = "steam" ]; then
+    if [ -z "$SIZE" ]; then
+        echo "--- --scale steam ohne Auflösung, nutze GNOME-Automatik" >&2
+        SCALE_SOURCE="gnome-auto"
+    else
+        STEAM_SCALE_CFG=$(steam_config_scale 2>/dev/null || true)
+        STEAM_SCALE_LOG=$(steam_log_scale 2>/dev/null || true)
+        STEAM_DISPLAY_NAME=$(steam_config_get "name" 2>/dev/null || true)
+
+        if [ -n "$STEAM_SCALE_CFG" ] && valid_scale "$STEAM_SCALE_CFG" \
+                && ! scale_matches_size "$STEAM_SCALE_CFG" "$SIZE" \
+                && ! steam_name_matches_size "$STEAM_DISPLAY_NAME" "$SIZE"; then
+            echo "--- Steam-Faktor $STEAM_SCALE_CFG passt nicht zu $SIZE (Name: ${STEAM_DISPLAY_NAME:-?}), nutze Fallback" >&2
+        fi
+
+        if [ -n "$STEAM_SCALE_CFG" ] && valid_scale "$STEAM_SCALE_CFG" \
+                && { scale_matches_size "$STEAM_SCALE_CFG" "$SIZE" \
+                     || steam_name_matches_size "$STEAM_DISPLAY_NAME" "$SIZE"; }; then
+            SCALE="$STEAM_SCALE_CFG"
+            SCALE_SOURCE="steam-config"
+        elif [ -n "$STEAM_SCALE_LOG" ] && valid_scale "$STEAM_SCALE_LOG" \
+                && { scale_matches_size "$STEAM_SCALE_LOG" "$SIZE" \
+                     || steam_name_matches_size "$STEAM_DISPLAY_NAME" "$SIZE"; }; then
+            SCALE="$STEAM_SCALE_LOG"
+            SCALE_SOURCE="steam-log"
+        else
+            SCALE=$(awk -v h="${SIZE#*x}" 'BEGIN {
+                if (h >= 2000) print "2.0";
+                else if (h >= 1400) print "1.3333";
+                else print "1.0";
+            }')
+            SCALE_SOURCE="steam-height"
+        fi
+    fi
+fi
+
+if [ "$SCALE_SOURCE" = "host" ]; then
+    HOST_SCALE="$DETECTED_HOST_SCALE"
+    if [ -n "$HOST_SCALE" ]; then
+        SCALE_SOURCE="host"
+    elif HOST_SCALE=$(cached_host_scale 2>/dev/null); then
+        SCALE_SOURCE="host-cache"
+    elif HOST_SCALE=$(monitors_xml_scale 2>/dev/null); then
+        SCALE_SOURCE="monitors-xml"
+    else
+        HOST_SCALE=$(awk -v h="${SIZE#*x}" 'BEGIN {
+            if (h >= 2000) print "2.0";
+            else if (h >= 1400) print "1.3333";
+            else print "1.0";
+        }')
+        SCALE_SOURCE="height"
+        echo "--- Host-Skalierung nicht ermittelbar, Fallback $HOST_SCALE" >&2
+    fi
+    SCALE="$HOST_SCALE"
+fi
+
+echo "--- env: desktop=${XDG_CURRENT_DESKTOP:-?} session=${XDG_SESSION_TYPE:-?} wayland=${WAYLAND_DISPLAY:-?} gs=${GAMESCOPE_WAYLAND_DISPLAY:-?} display=${DISPLAY:-?} devkit_gdk=${DEVKIT_BACKEND:-auto} gsk=${GSK_RENDERER:-?} steam_app=${STEAM_APP:-?} size=${SIZE:-default} scale=${SCALE:-auto} scale_source=$SCALE_SOURCE host_scale=${DETECTED_HOST_SCALE:-?}" >&2
+case "$SCALE_SOURCE" in
+    steam*)
+        echo "--- steam: name='${STEAM_DISPLAY_NAME:-?}' config_scale=${STEAM_SCALE_CFG:-?} log_scale=${STEAM_SCALE_LOG:-?}" >&2
+        ;;
+esac
+echo "--- sockets: $(ls "$RUNTIME" 2>/dev/null | grep -E '^(wayland|gamescope)-[0-9]+$' | tr '\n' ' ')" >&2
+
+MDK_DIR="${GNOME_NESTED_MDK_DIR:-${XDG_DATA_HOME:-$HOME/.local/share}/mutter-devkit}"
+SYSTEM_DEVKIT=""
+for candidate in /usr/libexec/mutter-devkit /usr/lib/mutter-devkit /usr/lib64/mutter-devkit; do
+    if [ -x "$candidate" ]; then
+        SYSTEM_DEVKIT="$candidate"
+        break
+    fi
+done
+
+export GSETTINGS_SCHEMA_DIR="$MDK_DIR/schemas${GSETTINGS_SCHEMA_DIR:+:$GSETTINGS_SCHEMA_DIR}"
+export GTK_A11Y=none
+export NO_AT_BRIDGE=1
+
+# System-Devkit bevorzugen. Dann startet die Shell den Viewer selbst auf dem
+# äußeren Display und bekommt die Monitor-Größe über --devkit-args. Nur wenn
+# kein System-Devkit vorhanden ist, wird die kleine lokale Kopie manuell
+# gestartet (mit --monitor-size).
+if [ -x "$SYSTEM_DEVKIT" ]; then
+    DEVKIT="$SYSTEM_DEVKIT"
+    MANUAL=0
+elif [ -x "$MDK_DIR/mutter-devkit" ]; then
+    DEVKIT="$MDK_DIR/mutter-devkit"
+    MANUAL=1
+else
+    DEVKIT="$MDK_DIR/mutter-devkit"
+    MANUAL=1
+fi
+
+if [ ! -x "$DEVKIT" ]; then
+    echo "mutter-devkit nicht gefunden: $DEVKIT" >&2
+    exit 1
+fi
+
+# In Flatpak-Sandboxes ist /tmp/.X11-unix oft 0755 ohne Sticky-Bit. Mutter
+# verweigert dann den Start des internen Xwayland:
+#   Failed to start X Wayland: Directory "/tmp/.X11-unix" is missing the sticky bit
+if [ -d /tmp/.X11-unix ]; then
+    chmod 1777 /tmp/.X11-unix 2>/dev/null || true
+fi
+
+# Die verschachtelte Sitzung ist eine GNOME-Sitzung, auch wenn sie aus gamescope
+# gestartet wurde. Ohne diese Variablen verweigert gnome-control-center den
+# Start ("Running gnome-control-center is only supported under GNOME and Unity")
+# und die Bluetooth-Leiste fehlt. GAMESCOPE_WAYLAND_DISPLAY gehört nur zum
+# äußeren Fenster, nicht in die verschachtelte Sitzung.
+export XDG_CURRENT_DESKTOP=GNOME
+export XDG_SESSION_DESKTOP=GNOME
+export DESKTOP_SESSION=gnome
+export XDG_SESSION_TYPE=wayland
+unset GAMESCOPE_WAYLAND_DISPLAY
+# GNOME_SETUP_DISPLAY zeigt auf das Xwayland der äußeren GNOME-Sitzung. In der
+# verschachtelten Sitzung würde gsd-xsettings damit eine falsche X-Auth-Datei
+# verwenden und mit "Invalid MIT-MAGIC-COOKIE-1 key" abbrechen.
+unset GNOME_SETUP_DISPLAY
+# Steam setzt XDG_DESKTOP_PORTAL_DIR auf einen leeren Wert. Dann lädt
+# xdg-desktop-portal keine .portal-Dateien, das Settings-Interface fehlt und
+# GTK/libadwaita bekommt kein color-scheme (Apps bleiben hell, obwohl
+# color-scheme=prefer-dark gesetzt ist).
+unset XDG_DESKTOP_PORTAL_DIR
+# Steam setzt GTK_IM_MODULE=Steam; dieses Eingabemodul existiert nicht.
+unset GTK_IM_MODULE
+case ":${XDG_DATA_DIRS:-}:" in
+    *:/usr/share:*)
+        ;;
+    *)
+        export XDG_DATA_DIRS="/usr/local/share:/usr/share${XDG_DATA_DIRS:+:$XDG_DATA_DIRS}"
+        ;;
+esac
+
+echo "--- nested-env: desktop=$XDG_CURRENT_DESKTOP session=$XDG_SESSION_DESKTOP type=$XDG_SESSION_TYPE gamescope_wayland=${GAMESCOPE_WAYLAND_DISPLAY:-unset} setup_display=${GNOME_SETUP_DISPLAY:-unset} portal_dir=${XDG_DESKTOP_PORTAL_DIR:-unset} gtk_im=${GTK_IM_MODULE:-unset}" >&2
+
+exec dbus-run-session -- bash -c '
+    LOG="$1"
+    DEVKIT="$2"
+    MANUAL="$3"
+    SIZE="$4"
+    SCALE="$5"
+    DEVKIT_BACKEND="$6"
+    HOST_BUS="$7"
+
+    echo "--- $(date -Is) Shell startet (devkit=$DEVKIT manual=$MANUAL size=${SIZE:-default} scale=${SCALE:-default} devkit_gdk=${DEVKIT_BACKEND:-auto})" >&2
+
+    # In einer normalen GNOME-Sitzung startet gnome-session gsd-rfkill. Ohne ihn
+    # hat das Bluetooth-Panel kein BluetoothHasAirplaneMode und meldet "Kein
+    # Bluetooth gefunden", obwohl BlueZ den Adapter auf dem Systembus sieht.
+    RFKILL_BIN=
+    for candidate in /usr/libexec/gsd-rfkill /usr/lib/gsd-rfkill; do
+        [ -x "$candidate" ] && { RFKILL_BIN="$candidate"; break; }
+    done
+    if [ -z "$RFKILL_BIN" ]; then
+        RFKILL_BIN=$(command -v gsd-rfkill 2>/dev/null || true)
+    fi
+    if [ -n "$RFKILL_BIN" ] && [ -x "$RFKILL_BIN" ]; then
+        "$RFKILL_BIN" >>"$LOG" 2>&1 &
+        rfkill_pid=$!
+        echo "--- $(date -Is) gsd-rfkill gestartet (pid=$rfkill_pid)" >&2
+    else
+        rfkill_pid=
+        echo "--- $(date -Is) gsd-rfkill nicht gefunden, Bluetooth-Panel ohne Adapter" >&2
+    fi
+
+    # Nur das Devkit-Fenster ist im Gaming Mode ein X11-Client. Die Apps der
+    # verschachtelten Sitzung sollen Wayland nutzen; mit ererbtem
+    # GDK_BACKEND=x11 fehlen ihnen sonst XSettings (Theme, Fensterknöpfe).
+    unset GDK_BACKEND
+
+    # dconf meldet Änderungen nur innerhalb derselben Session-Bus-Instanz. Die
+    # private Sitzung hat eine eigene dconf-Instanz und bekommt daher keine
+    # Live-Updates, wenn das Theme in der äußeren GNOME-Sitzung geändert wird.
+    # Relevante Schlüssel beobachten und Änderungen hier erneut setzen, damit
+    # die Apps in der verschachtelten Sitzung aktualisieren.
+    SYNC_KEYS="org.gnome.desktop.interface:color-scheme
+org.gnome.desktop.interface:gtk-theme
+org.gnome.desktop.interface:icon-theme
+org.gnome.desktop.interface:cursor-theme
+org.gnome.desktop.interface:cursor-size
+org.gnome.desktop.interface:accent-color
+org.gnome.desktop.interface:font-name
+org.gnome.desktop.interface:text-scaling-factor
+org.gnome.desktop.wm.preferences:button-layout"
+    (
+        declare -A sync_last=()
+        while :; do
+            for entry in $SYNC_KEYS; do
+                schema=${entry%%:*}
+                key=${entry#*:}
+                host_val=$(DBUS_SESSION_BUS_ADDRESS="$HOST_BUS" gsettings get "$schema" "$key" 2>/dev/null) || continue
+                [ -n "$host_val" ] || continue
+                if [ -n "${sync_last[$entry]:-}" ] && [ "$host_val" != "${sync_last[$entry]}" ]; then
+                    gsettings set "$schema" "$key" "$host_val" 2>/dev/null || true
+                fi
+                sync_last[$entry]="$host_val"
+            done
+            sleep 3
+        done
+    ) >>"$LOG" 2>&1 &
+    settings_sync_pid=$!
+
+    if [ "$MANUAL" = 0 ] && [ -n "$SIZE" ]; then
+        gnome-shell --wayland --devkit --devkit-args="--monitor-size $SIZE" >>"$LOG" 2>&1 &
+    else
+        gnome-shell --wayland --devkit >>"$LOG" 2>&1 &
+    fi
+    shell_pid=$!
+    xsettings_pid=
+    trap "kill $shell_pid ${rfkill_pid:-} ${xsettings_pid:-} ${settings_sync_pid:-} 2>/dev/null" EXIT
+
+    # Warten, bis die verschachtelte Shell ihren Devkit-Dienst anbietet
+    for _ in $(seq 1 100); do
+        gdbus introspect --session --dest org.gnome.Mutter.Devkit \
+            --object-path /org/gnome/Mutter/Devkit >/dev/null 2>&1 && break
+        kill -0 "$shell_pid" 2>/dev/null || { echo "--- Shell beendet (exit)" >&2; exit 1; }
+        sleep 0.2
+    done
+
+    if [ "$MANUAL" = 1 ]; then
+        if [ -n "$SIZE" ]; then
+            if [ -n "$DEVKIT_BACKEND" ]; then
+                GDK_BACKEND="$DEVKIT_BACKEND" "$DEVKIT" --monitor-size "$SIZE" >>"$LOG" 2>&1 &
+            else
+                "$DEVKIT" --monitor-size "$SIZE" >>"$LOG" 2>&1 &
+            fi
+        else
+            if [ -n "$DEVKIT_BACKEND" ]; then
+                GDK_BACKEND="$DEVKIT_BACKEND" "$DEVKIT" >>"$LOG" 2>&1 &
+            else
+                "$DEVKIT" >>"$LOG" 2>&1 &
+            fi
+        fi
+        devkit_pid=$!
+    else
+        # gnome-shell startet das Devkit selbst; auf dessen Kindprozess warten
+        devkit_pid=
+        for _ in $(seq 1 100); do
+            devkit_pid=$(pgrep -P "$shell_pid" -f mutter-devkit 2>/dev/null | head -n1)
+            [ -n "$devkit_pid" ] && break
+            sleep 0.1
+        done
+    fi
+
+    echo "--- $(date -Is) shell_pid=$shell_pid devkit_pid=${devkit_pid:-?}" >&2
+
+    # Gaming Mode: Devkit-Fenster randlos auf die volle Bildschirmgröße legen.
+    # Im Fullscreen-State blendet GTK die eigene Titelleiste aus, damit die
+    # verschachtelte Sitzung 1:1 in der Monitorauflösung läuft.
+    if [ "$DEVKIT_BACKEND" = "x11" ] && [ -n "$SIZE" ] && [ -n "${DISPLAY:-}" ] && command -v xdotool >/dev/null 2>&1; then
+        wid=
+        for _ in $(seq 1 40); do
+            wid=$(xdotool search --name "Mutter Development Kit" 2>/dev/null | tail -n1)
+            [ -n "$wid" ] && break
+            sleep 0.25
+        done
+        if [ -n "$wid" ]; then
+            xdotool windowmove "$wid" 0 0 2>/dev/null
+            # Direkt die Property setzen: gamescopes steamcompmgr ignoriert
+            # EWMH-Client-Messages, GTK reagiert aber auf den Property-Wert und
+            # blendet die Titelleiste im Fullscreen aus.
+            xprop -id "$wid" -f _NET_WM_STATE 32a \
+                  -set _NET_WM_STATE _NET_WM_STATE_FULLSCREEN 2>/dev/null
+            sleep 1
+            echo "--- $(date -Is) Fenster $wid fullscreen: $(xdotool getwindowgeometry "$wid" 2>/dev/null | tr "\\n" " ")" >&2
+        else
+            echo "--- $(date -Is) Devkit-Fenster nicht gefunden" >&2
+        fi
+    fi
+
+    # Skalierung des virtuellen Monitors über die private DisplayConfig setzen.
+    # "method 1" = nur temporär, monitors.xml bleibt unangetastet. Der Monitor
+    # unterstützt feste Stufen (1.0, 1.25, 1.3333, 1.6667, 2.0); der Wunschwert
+    # wird auf die nächstgelegene Stufe gerundet.
+    if [ -n "$SCALE" ]; then
+        state=
+        for _ in $(seq 1 60); do
+            state=$(gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+                --object-path /org/gnome/Mutter/DisplayConfig \
+                --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null)
+            [ -n "$state" ] && printf "%s\n" "$state" | grep -q "Meta-[0-9]" && break
+            sleep 0.25
+        done
+
+        serial=$(printf "%s\n" "$state" | sed -n "s/^(uint32 \([0-9]*\),.*/\1/p")
+        conn=$(printf "%s\n" "$state" | grep -m1 -oE "Meta-[0-9]+" | head -n1)
+        mode=$(printf "%s\n" "$state" | grep -m1 -oE "[0-9]+x[0-9]+@[0-9.]+" | head -n1)
+        scales=$(printf "%s\n" "$state" | grep -m1 -oE "\[[0-9][0-9., ]*\]" | head -n1)
+        pick=$(printf "%s\n" "$scales" | tr -d "[]" | tr "," "\n" | awk -v want="$SCALE" "NF { d = \$1 - want; if (d < 0) d = -d; if (best == \"\" || d < bd) { best = \$1; bd = d } } END { print best }")
+
+        if [ -z "$serial" ] || [ -z "$conn" ] || [ -z "$mode" ] || [ -z "$pick" ]; then
+            echo "--- $(date -Is) Skalierung nicht ermittelbar (serial=${serial:-?} conn=${conn:-?} mode=${mode:-?} scales=${scales:-?})" >&2
+        else
+            q=$(printf "\047")
+            mon="[(0,0,$pick,uint32 0,true,[($q$conn$q,$q$mode$q,@a{sv} {})])]"
+            echo "--- $(date -Is) Skalierung $pick (angefragt: $SCALE, Modus $mode)" >&2
+            out=$(gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+                --object-path /org/gnome/Mutter/DisplayConfig \
+                --method org.gnome.Mutter.DisplayConfig.ApplyMonitorsConfig \
+                "$serial" 1 "$mon" "{}" 2>&1)
+            echo "--- $(date -Is) ApplyMonitorsConfig: ${out:-ok}" >&2
+        fi
+    fi
+
+    # Ohne erzwungenen Faktor nur protokollieren, was GNOME selbst gewählt hat.
+    if [ -z "$SCALE" ]; then
+        state=
+        for _ in $(seq 1 20); do
+            state=$(gdbus call --session --dest org.gnome.Mutter.DisplayConfig \
+                --object-path /org/gnome/Mutter/DisplayConfig \
+                --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null)
+            printf "%s\n" "$state" | grep -q "Meta-[0-9]" && break
+            sleep 0.25
+        done
+        gscale=$(printf "%s\n" "$state" | tr -d " " \
+            | grep -oE "\([-0-9]+,[-0-9]+,[0-9]+([.][0-9]+)?,uint32" \
+            | head -n1 | cut -d, -f3)
+        echo "--- $(date -Is) Skalierung: GNOME-Automatik${gscale:+ (aktuell $gscale)}" >&2
+    fi
+
+    # Im Gaming Mode verschluckt gamescope beim Start eines Shortcuts manchmal
+    # das Key-Up (bekanntes Verhalten beim Abfangen von Shortcut-Tasten). Dann
+    # gilt die Taste im Xwayland weiter als gedrückt, ihr Auto-Repeat landet als
+    # Dauerfeuer im Devkit und die verschachtelte Sitzung startet mit einer
+    # hängenden Pfeiltaste. Einmalig Key-Ups für Navigation und Modifikatoren
+    # senden, nachdem Fenster und Skalierung fertig eingerichtet sind.
+    if [ "$DEVKIT_BACKEND" = "x11" ] && [ -n "$SIZE" ] && [ -n "${DISPLAY:-}" ] && command -v xdotool >/dev/null 2>&1; then
+        stuck_keys="Up Down Left Right Return KP_Enter Tab Escape space BackSpace"
+        stuck_keys="$stuck_keys Shift_L Shift_R Control_L Control_R Alt_L Alt_R Super_L Super_R"
+        failed=0
+        for key in $stuck_keys; do
+            xdotool keyup "$key" 2>/dev/null || failed=$((failed + 1))
+        done
+        echo "--- $(date -Is) Key-Up-Cleanup gesendet (${stuck_keys}; Fehler: $failed)" >&2
+    fi
+
+    # X11-Anwendungen in der Sitzung brauchen XSettings für Theme und
+    # Fensterknöpfe. Normalerweise startet das gnome-session. Das verschachtelte
+    # Xwayland startet erst beim ersten X11-Programm; deshalb wird gsd-xsettings
+    # in der Warteschleife nachgezogen, sobald es auftaucht.
+    XSETTINGS_BIN=
+    for candidate in /usr/libexec/gsd-xsettings /usr/lib/gsd-xsettings; do
+        [ -x "$candidate" ] && { XSETTINGS_BIN="$candidate"; break; }
+    done
+    if [ -z "$XSETTINGS_BIN" ]; then
+        XSETTINGS_BIN=$(command -v gsd-xsettings 2>/dev/null || true)
+    fi
+    xsettings_started=0
+    if [ -z "$XSETTINGS_BIN" ] || [ ! -x "$XSETTINGS_BIN" ]; then
+        echo "--- $(date -Is) gsd-xsettings nicht gefunden, X11-Apps ohne Theme/Buttons" >&2
+    fi
+
+    if [ -n "$devkit_pid" ]; then
+        sleep 1
+        echo "--- $(date -Is) Devkit-Verbindungen:" >&2
+        ss -xp 2>/dev/null | grep "pid=$devkit_pid" \
+            | grep -oE "$RUNTIME/[A-Za-z0-9._-]+" | sort -u | sed "s/^/    socket: /" >&2
+        if [ -n "${DISPLAY:-}" ] && command -v xwininfo >/dev/null 2>&1; then
+            xwininfo -root -tree 2>/dev/null | sed -n "1,25p" | sed "s/^/    x11: /" >&2
+        fi
+        echo "--- $(date -Is) Devkit-Status: $(ps -o stat= -p "$devkit_pid" 2>/dev/null || echo weg)" >&2
+    fi
+
+    # Laufen, bis das Devkit-Fenster geschlossen wird. Sobald Xwayland da ist,
+    # gsd-xsettings einmalig starten (Display und Auth-Datei stehen in dessen
+    # Kommandozeile).
+    while [ -n "$devkit_pid" ] && kill -0 "$devkit_pid" 2>/dev/null; do
+        if [ "$xsettings_started" = 0 ] && [ -n "$XSETTINGS_BIN" ] && [ -x "$XSETTINGS_BIN" ]; then
+            xw_pid=$(pgrep -P "$shell_pid" -x Xwayland 2>/dev/null | head -n1)
+            if [ -n "$xw_pid" ]; then
+                x_display=$(tr "\0" "\n" < /proc/$xw_pid/cmdline 2>/dev/null | sed -n "2p")
+                x_auth=$(tr "\0" "\n" < /proc/$xw_pid/cmdline 2>/dev/null | grep -A1 "^-auth$" | tail -n1)
+                if [ -n "$x_display" ] && [ -n "$x_auth" ]; then
+                    GDK_BACKEND=x11 DISPLAY="$x_display" XAUTHORITY="$x_auth" \
+                        "$XSETTINGS_BIN" >>"$LOG" 2>&1 &
+                    xsettings_pid=$!
+                    xsettings_started=1
+                    echo "--- $(date -Is) gsd-xsettings gestartet (display=$x_display pid=$xsettings_pid)" >&2
+                fi
+            fi
+        fi
+        sleep 1
+    done
+
+    if [ -n "$devkit_pid" ]; then
+        wait "$devkit_pid" 2>/dev/null
+        echo "--- $(date -Is) Devkit beendet (exit=$?), räume auf" >&2
+    else
+        echo "--- $(date -Is) Devkit-Prozess nicht gefunden, räume auf" >&2
+    fi
+    kill "$shell_pid" 2>/dev/null
+    [ -n "${rfkill_pid:-}" ] && kill "$rfkill_pid" 2>/dev/null
+    [ -n "${xsettings_pid:-}" ] && kill "$xsettings_pid" 2>/dev/null
+    [ -n "${settings_sync_pid:-}" ] && kill "$settings_sync_pid" 2>/dev/null
+    wait 2>/dev/null
+' bash "$LOG" "$DEVKIT" "$MANUAL" "$SIZE" "$SCALE" "$DEVKIT_BACKEND" "$HOST_BUS"
