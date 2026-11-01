@@ -289,7 +289,24 @@ def main(argv=None):
     p_list = sub.add_parser("list", help="Vorhandene Shortcuts anzeigen")
     p_list.add_argument("path")
 
-    args = parser.parse_args(argv)
+    if argv is None:
+        argv = sys.argv[1:]
+    else:
+        argv = list(argv)
+
+    # Startoptionen beginnen oft selbst mit "--" (z. B. "--gamescope").
+    # argparse würde den Wert sonst für eine weitere Option halten.
+    normalized = []
+    i = 0
+    while i < len(argv):
+        if argv[i] == "--launch-options" and i + 1 < len(argv):
+            normalized.append("--launch-options=" + argv[i + 1])
+            i += 2
+        else:
+            normalized.append(argv[i])
+            i += 1
+
+    args = parser.parse_args(normalized)
 
     try:
         if args.command == "list":

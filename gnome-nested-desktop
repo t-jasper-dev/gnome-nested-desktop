@@ -13,7 +13,13 @@
 #   --help
 #
 # Entsprechende Umgebungsvariablen: GNOME_NESTED_SIZE, GNOME_NESTED_SCALE,
-# GNOME_NESTED_BACKEND=wayland|x11.
+# GNOME_NESTED_BACKEND=wayland|x11, GNOME_NESTED_GAMESCOPE=1.
+#
+# --gamescope startet die Sitzung in einer eigenen gamescope-Instanz, falls noch
+# keine läuft. Das ist für Steam Link/Remote Play nötig: Steam kann nur X11-
+# Fenster aufnehmen, ein natives Wayland-Fenster scheitert mit
+# "PipewireRequired". In einer echten Gaming-Mode-Sitzung ist die Option ein
+# No-op, dort wird das vorhandene gamescope mitbenutzt.
 #
 # Ohne --size wird im Gaming Mode die Auflösung von gamescopes Xwayland
 # übernommen (= das, was Steam/gamescope gerade ausgeben). Ohne --scale wird
@@ -41,7 +47,11 @@ if [ -n "${GNOME_NESTED_REAL_HOME:-}" ]; then
 fi
 
 LOG="${XDG_RUNTIME_DIR:-/tmp}/gnome-nested-desktop.log"
-: >"$LOG" 2>/dev/null || LOG="/tmp/gnome-nested-desktop.log"
+# Beim Start über gamescope läuft dieser Wrapper ein zweites Mal. Dann das Log
+# nicht erneut leeren, sonst gehen die gamescope-Meldungen verloren.
+if [ -z "${GNOME_NESTED_GAMESCOPE_CHILD:-}" ]; then
+    : >"$LOG" 2>/dev/null || LOG="/tmp/gnome-nested-desktop.log"
+fi
 exec 2>>"$LOG"
 
 echo "=== $(date -Is) Start" >&2
@@ -49,6 +59,7 @@ echo "=== $(date -Is) Start" >&2
 usage() {
     cat <<'EOF'
 Aufruf: gnome-nested-desktop [--size WxH] [--scale N|host|auto|steam]
+                            [--gamescope]
 
   --size WxH   Auflösung der verschachtelten Sitzung (Standard: Gaming Mode =
                gamescope-Auflösung, Desktop Mode = Devkit-Standard 1280x800)
@@ -58,15 +69,22 @@ Aufruf: gnome-nested-desktop [--size WxH] [--scale N|host|auto|steam]
   --scale auto   GNOME wählt die Skalierung selbst
   --scale steam  Faktor übernehmen, den Steam für seine eigene Oberfläche
                  benutzt (config.vdf), sonst aus der Auflösung abgeleitet
+  --gamescope    In einer eigenen gamescope-Instanz starten (für Steam Link).
+                 Ohne Wirkung, wenn bereits eine Gaming-Mode-Sitzung läuft.
 EOF
 }
 
 SIZE_ARG=""
 SCALE_ARG=""
+GAMESCOPE_REQUEST=0
 while [ $# -gt 0 ]; do
     case "$1" in
         --size=*)  SIZE_ARG="${1#*=}"; shift ;;
         --scale=*) SCALE_ARG="${1#*=}"; shift ;;
+        --gamescope|--gamemode)
+            GAMESCOPE_REQUEST=1
+            shift
+            ;;
         --size|--scale)
             if [ $# -lt 2 ]; then
                 echo "--- Fehlender Wert für $1" >&2
@@ -100,6 +118,89 @@ unset LD_PRELOAD MANGOHUD MANGOHUD_CONFIG SteamAppId SteamGameId \
 # Der GL-Renderer funktioniert in beiden Modi.
 export GSK_RENDERER="${GSK_RENDERER:-gl}"
 
+# --- Gaming Mode über gamescope ----------------------------------------------
+# Steam Link/Remote Play braucht ein X11-Fenster, das Steam aufnehmen kann. Ein
+# natives Wayland-Fenster (Desktop Mode) scheitert mit "PipewireRequired".
+# --gamescope startet deshalb eine eigene gamescope-Instanz mit SDL/X11-Ausgabe
+# und die Sitzung darin. Läuft bereits gamescope (echte Gaming-Mode-Sitzung),
+# wird nichts verschachtelt.
+case "${GNOME_NESTED_GAMESCOPE:-}" in
+    1|yes|true|ja) GAMESCOPE_REQUEST=1 ;;
+esac
+
+in_gamescope() {
+    [ -n "${GNOME_NESTED_GAMESCOPE_CHILD:-}" ] && return 0
+    [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ] && return 0
+    [ "${XDG_CURRENT_DESKTOP:-}" = gamescope ] && return 0
+    return 1
+}
+
+# Physische Auflösung des aktuellen Monitors. Über die DisplayConfig der
+# äußeren GNOME-Sitzung, damit die Skalierung (z. B. 1.5) erhalten bleibt.
+host_screen_size() {
+    local state size
+    state=$(DBUS_SESSION_BUS_ADDRESS="$HOST_BUS" gdbus call --session \
+        --dest org.gnome.Mutter.DisplayConfig \
+        --object-path /org/gnome/Mutter/DisplayConfig \
+        --method org.gnome.Mutter.DisplayConfig.GetCurrentState 2>/dev/null) || state=""
+    if [ -n "$state" ]; then
+        # Der dritte Teil von GetCurrentState enthält nur die Connector-
+        # Zuordnung. Die aktive Auflösung steht bei den Monitormodi, markiert
+        # mit is-current. Bei mehreren Monitoren die größte aktive nehmen.
+        size=$(printf '%s\n' "$state" | tr -d ' ' \
+            | grep -oE "\('[0-9]+x[0-9]+@[0-9.]+'[^}]*\{'is-current':<true>" \
+            | sed -E "s/^\('([0-9]+x[0-9]+)@.*/\1/" \
+            | awk -Fx '{print $1 * $2, $0}' | sort -nr | head -n1 | cut -d' ' -f2)
+        case "$size" in
+            [0-9]*x[0-9]*) printf '%s\n' "$size"; return 0 ;;
+        esac
+    fi
+    if [ -n "${DISPLAY:-}" ]; then
+        size=$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')
+        case "$size" in
+            [0-9]*x[0-9]*) printf '%s\n' "$size"; return 0 ;;
+        esac
+    fi
+    return 1
+}
+
+if [ "$GAMESCOPE_REQUEST" = 1 ] && ! in_gamescope; then
+    if ! command -v gamescope >/dev/null 2>&1; then
+        echo "--- gamescope nicht gefunden, starte ohne Gaming-Mode-Fenster" >&2
+    else
+        GS_SIZE="${SIZE_ARG:-${GNOME_NESTED_SIZE:-}}"
+        case "$GS_SIZE" in
+            [0-9]*x[0-9]*) ;;
+            "")
+                GS_SIZE=$(host_screen_size 2>/dev/null || true)
+                ;;
+            *)
+                echo "--- ungültige Größe '$GS_SIZE' für gamescope, ermittle Bildschirmgröße" >&2
+                GS_SIZE=$(host_screen_size 2>/dev/null || true)
+                ;;
+        esac
+
+        gs_args=(--backend sdl -f)
+        # SDL/X11 statt Wayland: Nur ein X11-Fenster kann Steam in Desktop Mode
+        # per XComposite aufnehmen. In einer echten Gaming-Mode-Sitzung wird
+        # dieser Zweig gar nicht erreicht.
+        if [ -n "${DISPLAY:-}" ]; then
+            export SDL_VIDEODRIVER=x11
+        fi
+        if [ -n "$GS_SIZE" ]; then
+            gs_args+=(-W "${GS_SIZE%x*}" -H "${GS_SIZE#*x}")
+        fi
+
+        child_args=()
+        [ -n "$SIZE_ARG" ] && child_args+=(--size "$SIZE_ARG")
+        [ -n "$SCALE_ARG" ] && child_args+=(--scale "$SCALE_ARG")
+
+        echo "--- starte gamescope: ${gs_args[*]}${GS_SIZE:+ ($GS_SIZE)} -> $0 ${child_args[*]}" >&2
+        export GNOME_NESTED_GAMESCOPE_CHILD=1
+        exec gamescope "${gs_args[@]}" -- "$0" "${child_args[@]}"
+    fi
+fi
+
 # --- Anzeige wählen -----------------------------------------------------------
 # gamescope (Gaming Mode) startet Programme ohne WAYLAND_DISPLAY; die
 # Wayland-Anbindung steckt in GAMESCOPE_WAYLAND_DISPLAY. Im Desktop-Mode gibt
@@ -121,7 +222,8 @@ case "${GNOME_NESTED_BACKEND:-auto}" in
         DEVKIT_BACKEND=wayland
         ;;
     *)
-        if [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ] || [ "${XDG_CURRENT_DESKTOP:-}" = gamescope ]; then
+        if [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ] || [ "${XDG_CURRENT_DESKTOP:-}" = gamescope ] \
+                || [ -n "${GNOME_NESTED_GAMESCOPE_CHILD:-}" ]; then
             # Gaming Mode: Steam erkennt nur Fenster, die über gamescopes
             # Xwayland (steamcompmgr) laufen. Ein natives Wayland-Fenster bleibt
             # für Steam unsichtbar ("WaitingGameWindow", Steam-Logo dreht sich).
@@ -443,12 +545,13 @@ fi
 # gestartet wurde. Ohne diese Variablen verweigert gnome-control-center den
 # Start ("Running gnome-control-center is only supported under GNOME and Unity")
 # und die Bluetooth-Leiste fehlt. GAMESCOPE_WAYLAND_DISPLAY gehört nur zum
-# äußeren Fenster, nicht in die verschachtelte Sitzung.
+# äußeren Fenster, nicht in die verschachtelte Sitzung. SDL_VIDEODRIVER=x11
+# gilt nur für gamescope; die Apps der Sitzung sollen Wayland nutzen.
 export XDG_CURRENT_DESKTOP=GNOME
 export XDG_SESSION_DESKTOP=GNOME
 export DESKTOP_SESSION=gnome
 export XDG_SESSION_TYPE=wayland
-unset GAMESCOPE_WAYLAND_DISPLAY
+unset GAMESCOPE_WAYLAND_DISPLAY SDL_VIDEODRIVER GNOME_NESTED_GAMESCOPE_CHILD
 # GNOME_SETUP_DISPLAY zeigt auf das Xwayland der äußeren GNOME-Sitzung. In der
 # verschachtelten Sitzung würde gsd-xsettings damit eine falsche X-Auth-Datei
 # verwenden und mit "Invalid MIT-MAGIC-COOKIE-1 key" abbrechen.
@@ -500,10 +603,16 @@ exec dbus-run-session -- bash -c '
         echo "--- $(date -Is) gsd-rfkill nicht gefunden, Bluetooth-Panel ohne Adapter" >&2
     fi
 
-    # Nur das Devkit-Fenster ist im Gaming Mode ein X11-Client. Die Apps der
-    # verschachtelten Sitzung sollen Wayland nutzen; mit ererbtem
-    # GDK_BACKEND=x11 fehlen ihnen sonst XSettings (Theme, Fensterknöpfe).
-    unset GDK_BACKEND
+    # Nur das Devkit-Fenster ist im Gaming Mode ein X11-Client. Die Shell
+    # startet den Viewer selbst und reicht ihre Umgebung an ihn weiter; also
+    # bekommt hier nur die Shell GDK_BACKEND=x11. Wichtig: Erst nach
+    # dbus-run-session setzen, damit die Aktivierungsumgebung der privaten
+    # Sitzung es nicht erbt – darüber gestartete Apps bleiben auf Wayland.
+    if [ "$DEVKIT_BACKEND" = "x11" ]; then
+        export GDK_BACKEND=x11
+    else
+        unset GDK_BACKEND
+    fi
 
     # dconf meldet Änderungen nur innerhalb derselben Session-Bus-Instanz. Die
     # private Sitzung hat eine eigene dconf-Instanz und bekommt daher keine

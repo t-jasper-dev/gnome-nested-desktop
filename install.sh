@@ -114,6 +114,11 @@ for c in install gdbus xdotool xprop xrandr dbus-run-session python3 pgrep; do
 done
 command -v gnome-shell >/dev/null 2>&1 || die "gnome-shell fehlt"
 [ -n "${XDG_RUNTIME_DIR:-}" ] || warn "XDG_RUNTIME_DIR ist nicht gesetzt"
+if ! command -v gamescope >/dev/null 2>&1; then
+    warn "gamescope fehlt. Der Steam-Shortcut startet dann ohne Gaming-Mode-"
+    warn "Fenster; Steam Link/Remote Play kann die Sitzung so nicht aufnehmen."
+    warn "Installation z. B. mit: sudo pacman -S gamescope  (oder dnf/apt)"
+fi
 
 ensure_devkit_schema() {
     local schema="$MDK_DIR/schemas/org.gnome.mutter.devkit.gschema.xml"
@@ -324,6 +329,7 @@ install_steam_shortcut() {
             --exe "$BIN_DIR/gnome-nested-desktop"
             --startdir "$BIN_DIR"
             --icon "$MDK_DIR/gnome-nested.png"
+            --launch-options "--gamescope"
         )
         [ -n "$APPID" ] && args+=(--appid "$APPID")
         if appid=$(python3 "$PROJECT_DIR/steam-shortcut.py" add "$vdf" "${args[@]}" 2>&1); then
@@ -391,8 +397,13 @@ Steam-Shortcut:
   Wird automatisch in shortcuts.vdf angelegt (Name: $STEAM_NAME).
   Ziel:          $BIN_DIR/gnome-nested-desktop
   Startordner:   $BIN_DIR
-  Startoptionen: (leer)
+  Startoptionen: --gamescope
   Icon:          $MDK_DIR/gnome-nested.png
+
+  --gamescope startet die Sitzung in einer eigenen gamescope-Instanz, damit
+  Steam Link/Remote Play das Fenster aufnehmen kann. In einer echten
+  Gaming-Mode-Sitzung wird das vorhandene gamescope mitbenutzt.
+  Für eine kleinere Stream-Auflösung z. B.: --gamescope --size 1920x1080 --scale 1
 
   Falls Steam beim Installieren lief und nicht beendet wurde:
   Steam beenden und install.sh erneut ausführen.

@@ -43,7 +43,7 @@ DISTRO="${ID:-unknown} ${ID_LIKE:-}"
 say "Prüfe vorhandene GNOME-Bestandteile"
 
 missing=()
-for c in gnome-shell gnome-control-center nautilus xdotool xprop xrandr dconf gdbus dbus-run-session pgrep; do
+for c in gnome-shell gnome-control-center nautilus xdotool xprop xrandr dconf gdbus dbus-run-session pgrep gamescope; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 gsd_found=0
@@ -99,7 +99,7 @@ case "$DISTRO" in
             dconf gsettings-desktop-schemas glib2
             dbus-daemon dbus-tools
             xdotool xprop xrandr xwininfo
-            procps-ng iproute
+            procps-ng iproute gamescope
         )
         if command -v rpm-ostree >/dev/null 2>&1; then
             warn "rpm-ostree-System: Pakete werden als Layer installiert und"
@@ -118,7 +118,7 @@ case "$DISTRO" in
             dconf gsettings-desktop-schemas glib2
             dbus
             xdotool xorg-xprop xorg-xrandr xorg-xwininfo
-            procps-ng iproute2
+            procps-ng iproute2 gamescope
         )
         run "$SUDO" pacman -S --needed --noconfirm "${PKGS[@]}"
         ;;
@@ -130,7 +130,7 @@ case "$DISTRO" in
             dconf-cli gsettings-desktop-schemas libglib2.0-bin
             dbus
             xdotool x11-utils x11-xserver-utils
-            procps iproute2
+            procps iproute2 gamescope
         )
         run "$SUDO" apt update
         run "$SUDO" apt install -y "${PKGS[@]}"
@@ -143,7 +143,7 @@ case "$DISTRO" in
             dconf gsettings-desktop-schemas glib2-tools
             dbus-1
             xdotool xprop xrandr xwininfo
-            procps iproute2
+            procps iproute2 gamescope
         )
         run "$SUDO" zypper --non-interactive install "${PKGS[@]}"
         ;;
