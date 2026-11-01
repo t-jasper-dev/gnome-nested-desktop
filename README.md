@@ -22,7 +22,8 @@ D-Bus-Session und wird über `mutter-devkit` in einem Fenster angezeigt.
 - Minimieren/Maximieren/Schließen in Apps (`gsd-xsettings` für X11,
   `button-layout` für Wayland).
 - Key-Up-Cleanup gegen hängende Pfeiltasten nach dem Start aus gamescope.
-- Steam-Artwork (Grid, Hero, Logo, Header) und App-Icon.
+- Legt den Steam-Shortcut automatisch an (`shortcuts.vdf`) und installiert das
+  Artwork (Grid, Hero, Logo, Header) sowie das App-Icon.
 
 ## Voraussetzungen
 
@@ -30,7 +31,8 @@ D-Bus-Session und wird über `mutter-devkit` in einem Fenster angezeigt.
 - `gnome-shell`, `mutter`, `mutter-devkit`
 - `gnome-settings-daemon`, `xdg-desktop-portal-gnome`,
   `gnome-control-center`, `nautilus`
-- `gdbus`, `dbus-run-session`, `xdotool`, `xprop`, `xrandr`, `dconf`
+- `gdbus`, `dbus-run-session`, `xdotool`, `xprop`, `xrandr`, `dconf`,
+  `pgrep` (procps)
 - `python3`, `dnf`, `rpm2cpio`, `cpio` (nur für die lokale Devkit-Installation
   auf Fedora)
 
@@ -43,6 +45,12 @@ Die Pakete können mit `./install-deps.sh` aus dem System installiert werden
 
 Eine Zeile im Terminal – es wird nur ein temporäres Archiv geladen, entpackt
 und `install.sh` gestartet. Das System selbst wird dabei nicht verändert.
+`install.sh` legt Wrapper, Desktop-Eintrag und den Steam-Shortcut an.
+
+Läuft Steam während der Installation, fragt das Skript, ob Steam kurz beendet
+werden darf. Das ist nötig, weil Steam `shortcuts.vdf` beim Beenden aus dem
+Speicher neu schreibt und den neuen Eintrag sonst wieder verwerfen würde.
+Danach wird Steam automatisch neu gestartet.
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/t-jasper-dev/gnome-nested-desktop/main/get.sh | bash
@@ -100,15 +108,17 @@ Alternativ genügt `./get.sh` im Checkout – es ruft dasselbe `install.sh` auf.
   vorhanden (aus dem passenden `mutter-devkit`-RPM entpackt)
 - `~/.local/share/mutter-devkit/gnome-nested.png` (Icon)
 - `~/.local/share/applications/gnome-nested-desktop.desktop`
-- Steam-Artwork, wenn ein Shortcut mit dem Ziel
-  `gnome-nested-desktop` existiert
+- Steam-Shortcut in `shortcuts.vdf` inkl. Artwork (falls Steam-Userdata
+  vorhanden; Steam wird bei Bedarf kurz beendet und neu gestartet)
 
 Optionen:
 
 ```text
---appid ID       Steam-AppID vorgeben, falls die automatische Erkennung fehlschlägt
---skip-devkit    Devkit-Installation überspringen
---skip-steam     Steam-Artwork überspringen
+--appid ID        Steam-AppID vorgeben, falls die automatische Erkennung fehlschlägt
+--restart-steam   Steam ohne Rückfrage beenden und nach dem Schreiben neu starten
+--skip-shortcut   Steam-Shortcut nicht anlegen (Artwork wird trotzdem installiert)
+--skip-devkit     Devkit-Installation überspringen
+--skip-steam      Steam-Shortcut und Artwork überspringen
 ```
 
 Falls die Devkit-Installation nicht gewünscht ist:
@@ -164,18 +174,30 @@ Auf Debian/Ubuntu ist `mutter-devkit` oft nicht paketiert.
 
 ## Steam-Shortcut
 
-In Steam einen Nicht-Steam-Shortcut anlegen:
+`install.sh` legt den Nicht-Steam-Shortcut automatisch an:
 
 ```text
+Name:          GNOME (verschachtelt)
 Ziel:          ~/.local/bin/gnome-nested-desktop
 Startordner:   ~/.local/bin
 Startoptionen: (leer)
-Name:          GNOME (verschachtelt)
 Icon:          ~/.local/share/mutter-devkit/gnome-nested.png
 ```
 
-Danach `./install.sh` erneut ausführen, damit das Artwork zur AppID kopiert
-wird. Alternativ die AppID mit `--appid` angeben.
+Der Eintrag landet in `~/.local/share/Steam/userdata/<ID>/config/shortcuts.vdf`.
+Die AppID wird deterministisch aus Zielpfad und Name berechnet; ein erneuter
+Lauf legt keinen doppelten Eintrag an, sondern aktualisiert den vorhandenen.
+Für Flatpak-Steam wird der Shortcut nicht automatisch angelegt (dort müsste
+das Ziel über `flatpak-spawn --host` laufen); native Steam-Installationen
+werden unterstützt.
+
+**Wichtig:** Steam muss beim Schreiben beendet sein, weil Steam die Datei beim
+Beenden aus dem Speicher überschreibt. Läuft Steam, fragt `install.sh` nach
+(Enter = ja) und startet Steam nach dem Schreiben wieder. Ohne Terminal oder
+mit `n` wird der Shortcut übersprungen; dann einfach Steam beenden und
+`install.sh` erneut ausführen. Mit `--restart-steam` geht das ohne Rückfrage.
+
+Nach dem Schreiben Steam neu starten, damit Shortcut und Artwork erscheinen.
 
 Die Bilder liegen unter:
 
@@ -190,6 +212,9 @@ Die Bilder liegen unter:
 
 Steam cacht Bibliotheksgrafiken teilweise – im Zweifel Steam bzw. den Gaming
 Mode neu starten.
+
+Falls der automatische Eintrag nicht gewünscht ist, `--skip-shortcut`
+(Artwork bleibt) oder `--skip-steam` (beides aus) verwenden.
 
 ## Benutzung
 
@@ -251,7 +276,9 @@ rm -rf ~/.cache/gnome-nested-desktop
 
 Steam-Artwork liegt im `config/grid`-Ordner der Steam-Userdata und kann dort
 entfernt werden. Backups der überschriebenen Dateien enden auf
-`.bak.<Zeitstempel>`.
+`.bak.<Zeitstempel>`. Den Shortcut selbst in Steam entfernen (Rechtsklick →
+Verwalten → Von Bibliothek entfernen) oder aus `shortcuts.vdf` löschen; die
+Datei dabei nur bei beendetem Steam bearbeiten.
 
 ## Lizenzhinweise
 

@@ -6,9 +6,10 @@
 #   - ~/.local/share/mutter-devkit/mutter-devkit (+ GSettings-Schema), falls nötig
 #   - ~/.local/share/mutter-devkit/gnome-nested.png
 #   - ~/.local/share/applications/gnome-nested-desktop.desktop
-#   - Steam-Artwork im userdata-Grid-Ordner, wenn ein Shortcut existiert
+#   - Steam-Non-Steam-Shortcut (shortcuts.vdf) inkl. Artwork
 #
-# Aufruf: ./install.sh [--appid ID] [--skip-devkit] [--skip-steam]
+# Aufruf: ./install.sh [--appid ID] [--restart-steam] [--skip-shortcut]
+#                      [--skip-devkit] [--skip-steam]
 #
 # Das Skript braucht keine Root-Rechte. Wenn mutter-devkit fehlt, wird das
 # passende RPM mit "dnf download" geholt und nach ~/.local/share/mutter-devkit
@@ -23,7 +24,7 @@ BIN_DIR="$HOME/.local/bin"
 DATA_HOME="${XDG_DATA_HOME:-$HOME/.local/share}"
 MDK_DIR="$DATA_HOME/mutter-devkit"
 APP_DIR="$DATA_HOME/applications"
-STEAM_USERDATA="$HOME/.local/share/Steam/userdata"
+STEAM_NAME="GNOME (verschachtelt)"
 SYSTEM_DEVKIT=""
 for candidate in /usr/libexec/mutter-devkit /usr/lib/mutter-devkit /usr/lib64/mutter-devkit; do
     if [ -x "$candidate" ]; then
@@ -35,6 +36,9 @@ done
 APPID=""
 SKIP_DEVKIT=0
 SKIP_STEAM=0
+SKIP_SHORTCUT=0
+RESTART_STEAM=0
+STEAM_WAS_RUNNING=0
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -53,8 +57,12 @@ Aufruf: ./install.sh [OPTIONEN]
 
   --appid ID       Steam-AppID des Shortcuts vorgeben (sonst automatisch
                    anhand des Shortcut-Ziels gnome-nested-desktop gesucht)
+  --restart-steam  Steam für das Schreiben des Shortcuts automatisch beenden
+                   und danach wieder starten (sonst wird gefragt)
+  --skip-shortcut  Steam-Shortcut nicht anlegen/aktualisieren (Artwork wird
+                   trotzdem installiert)
   --skip-devkit    mutter-devkit nicht prüfen/installieren
-  --skip-steam     Steam-Artwork nicht installieren
+  --skip-steam     Steam-Shortcut und Artwork nicht installieren
   -h, --help       Diese Hilfe anzeigen
 EOF
 }
@@ -78,6 +86,14 @@ while [ $# -gt 0 ]; do
             SKIP_STEAM=1
             shift
             ;;
+        --skip-shortcut)
+            SKIP_SHORTCUT=1
+            shift
+            ;;
+        --restart-steam)
+            RESTART_STEAM=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -89,10 +105,11 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$PROJECT_DIR/gnome-nested-desktop" ] || die "Wrapper fehlt: $PROJECT_DIR/gnome-nested-desktop"
+[ -f "$PROJECT_DIR/steam-shortcut.py" ] || die "steam-shortcut.py fehlt: $PROJECT_DIR/steam-shortcut.py"
 [ -d "$ASSET_DIR" ] || die "Assets fehlen: $ASSET_DIR"
 
 say "Prüfe Abhängigkeiten"
-for c in install gdbus xdotool xprop xrandr dbus-run-session python3; do
+for c in install gdbus xdotool xprop xrandr dbus-run-session python3 pgrep; do
     command -v "$c" >/dev/null 2>&1 || die "Befehl fehlt: $c"
 done
 command -v gnome-shell >/dev/null 2>&1 || die "gnome-shell fehlt"
@@ -199,18 +216,144 @@ sys.exit(1)
 PY
 }
 
+steam_roots() {
+    printf '%s\n' \
+        "${XDG_DATA_HOME:-$HOME/.local/share}/Steam" \
+        "$HOME/.steam/steam" \
+        "$HOME/.steam/root"
+}
+
+find_steam_config_dirs() {
+    local root dir real seen=" "
+    while IFS= read -r root; do
+        [ -d "$root/userdata" ] || continue
+        for dir in "$root"/userdata/*/config; do
+            [ -d "$dir" ] || continue
+            real=$(readlink -f -- "$dir" 2>/dev/null || printf '%s' "$dir")
+            case "$seen" in
+                *" $real "*) continue ;;
+            esac
+            seen="$seen$real "
+            printf '%s\n' "$dir"
+        done
+    done < <(steam_roots)
+}
+
+steam_running() {
+    pgrep -x steam >/dev/null 2>&1 && return 0
+    pgrep -f '(^|/)ubuntu12_32/steam( |$)' >/dev/null 2>&1 && return 0
+    pgrep -f 'steamwebhelper' >/dev/null 2>&1 && return 0
+    return 1
+}
+
+steam_shutdown() {
+    STEAM_WAS_RUNNING=1
+    say "Beende Steam"
+    if command -v steam >/dev/null 2>&1; then
+        steam -shutdown >/dev/null 2>&1 || true
+    fi
+    local _
+    for _ in $(seq 1 60); do
+        steam_running || return 0
+        sleep 0.5
+    done
+    warn "Steam läuft nach 30 s noch."
+    return 1
+}
+
+prepare_steam_write() {
+    steam_running || return 0
+    warn "Steam läuft. Steam hält shortcuts.vdf im Speicher und überschreibt"
+    warn "die Datei beim Beenden – der Shortcut ginge sonst wieder verloren."
+
+    if [ "$RESTART_STEAM" = 1 ]; then
+        steam_shutdown && return 0
+        return 1
+    fi
+
+    if [ -r /dev/tty ] && ( : </dev/tty ) 2>/dev/null; then
+        local answer=""
+        printf 'Steam jetzt beenden, Shortcut schreiben und Steam danach neu starten? [J/n] ' >/dev/tty
+        read -r answer </dev/tty || answer="n"
+        case "$answer" in
+            ""|j|J|ja|Ja|JA|y|Y|yes|Yes|YES)
+                steam_shutdown && return 0
+                return 1
+                ;;
+        esac
+    fi
+
+    warn "Shortcut wird übersprungen. Beende Steam und führe install.sh erneut"
+    warn "aus (oder nutze --restart-steam). Artwork wird trotzdem vorbereitet."
+    return 1
+}
+
+restart_steam_if_needed() {
+    [ "$STEAM_WAS_RUNNING" = 1 ] || return 0
+    say "Starte Steam neu"
+    if command -v setsid >/dev/null 2>&1; then
+        setsid steam >/dev/null 2>&1 </dev/null &
+    else
+        nohup steam >/dev/null 2>&1 </dev/null &
+    fi
+}
+
+install_steam_shortcut() {
+    [ "$SKIP_STEAM" = 1 ] && { say "Steam-Shortcut übersprungen"; return; }
+    [ "$SKIP_SHORTCUT" = 1 ] && { say "Steam-Shortcut übersprungen"; return; }
+
+    local config_dirs=()
+    mapfile -t config_dirs < <(find_steam_config_dirs)
+    if [ ${#config_dirs[@]} -eq 0 ]; then
+        warn "Keine Steam-Userdata gefunden. Steam einmal starten und einloggen,"
+        warn "danach install.sh erneut ausführen."
+        return
+    fi
+
+    local write_ok=0
+    prepare_steam_write && write_ok=1
+
+    local config vdf appid args
+    for config in "${config_dirs[@]}"; do
+        [ "$write_ok" = 1 ] || continue
+        vdf="$config/shortcuts.vdf"
+        say "Lege Steam-Shortcut an"
+        backup "$vdf"
+        args=(
+            --name "$STEAM_NAME"
+            --exe "$BIN_DIR/gnome-nested-desktop"
+            --startdir "$BIN_DIR"
+            --icon "$MDK_DIR/gnome-nested.png"
+        )
+        [ -n "$APPID" ] && args+=(--appid "$APPID")
+        if appid=$(python3 "$PROJECT_DIR/steam-shortcut.py" add "$vdf" "${args[@]}" 2>&1); then
+            say "Steam-Shortcut AppID $appid"
+        else
+            warn "Shortcut konnte nicht geschrieben werden: $appid"
+        fi
+    done
+}
+
 install_steam_art() {
     [ "$SKIP_STEAM" = 1 ] && { say "Steam-Artwork übersprungen"; return; }
     say "Installiere Steam-Artwork"
-    local found=0 vdf appid grid
-    for vdf in "$STEAM_USERDATA"/*/config/shortcuts.vdf; do
-        [ -f "$vdf" ] || continue
+    local config_dirs=() config vdf appid grid found=0
+    mapfile -t config_dirs < <(find_steam_config_dirs)
+    for config in "${config_dirs[@]}"; do
+        vdf="$config/shortcuts.vdf"
         appid="$APPID"
         if [ -z "$appid" ]; then
-            appid=$(find_appid "$vdf" || true)
+            appid=$(find_appid "$vdf" 2>/dev/null || true)
+        fi
+        if [ -z "$appid" ]; then
+            # Noch kein Eintrag (z. B. Steam lief noch): dieselbe AppID, die
+            # der Shortcut beim nächsten Lauf bekommt, schon jetzt verwenden.
+            appid=$(python3 "$PROJECT_DIR/steam-shortcut.py" appid "$vdf" \
+                --name "$STEAM_NAME" \
+                --exe "$BIN_DIR/gnome-nested-desktop" 2>/dev/null || true)
         fi
         [ -n "$appid" ] || continue
-        grid="$(dirname -- "$vdf")/grid"
+        grid="$config/grid"
         install -d "$grid"
         backup "$grid/${appid}p.png"
         backup "$grid/${appid}_hero.png"
@@ -226,17 +369,15 @@ install_steam_art() {
         found=1
     done
     if [ "$found" = 0 ]; then
-        warn "Kein Steam-Shortcut gefunden. Lege einen Shortcut an:"
-        warn "  Ziel:          $BIN_DIR/gnome-nested-desktop"
-        warn "  Startordner:   $BIN_DIR"
-        warn "  Startoptionen: (leer)"
-        warn "Danach install.sh erneut ausführen oder --appid <ID> angeben."
+        warn "Kein Steam-Userdata-Ordner gefunden – Artwork nicht installiert."
     else
-        warn "Steam ggf. neu starten, damit die neuen Bilder geladen werden."
+        warn "Steam nach dem Schreiben neu starten, damit Shortcut und Bilder erscheinen."
     fi
 }
 
+install_steam_shortcut
 install_steam_art
+restart_steam_if_needed
 
 say "Fertig"
 cat <<EOF
@@ -247,10 +388,14 @@ Desktop:  $APP_DIR/gnome-nested-desktop.desktop
 Log:      ${XDG_RUNTIME_DIR:-/tmp}/gnome-nested-desktop.log
 
 Steam-Shortcut:
+  Wird automatisch in shortcuts.vdf angelegt (Name: $STEAM_NAME).
   Ziel:          $BIN_DIR/gnome-nested-desktop
   Startordner:   $BIN_DIR
   Startoptionen: (leer)
   Icon:          $MDK_DIR/gnome-nested.png
+
+  Falls Steam beim Installieren lief und nicht beendet wurde:
+  Steam beenden und install.sh erneut ausführen.
 
 Skalierung:
   Standard ist derselbe Faktor wie die laufende GNOME-Sitzung.

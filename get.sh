@@ -16,6 +16,8 @@
 #   GND_REF    Branch oder Tag (Standard: main)
 #
 # Es wird nichts installiert, was install.sh nicht auch selbst installiert.
+# install.sh legt auch den Steam-Shortcut an und beendet Steam dafür nach
+# Rückfrage (Enter = ja).
 
 set -euo pipefail
 

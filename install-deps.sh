@@ -43,7 +43,7 @@ DISTRO="${ID:-unknown} ${ID_LIKE:-}"
 say "Prüfe vorhandene GNOME-Bestandteile"
 
 missing=()
-for c in gnome-shell gnome-control-center nautilus xdotool xprop xrandr dconf gdbus dbus-run-session; do
+for c in gnome-shell gnome-control-center nautilus xdotool xprop xrandr dconf gdbus dbus-run-session pgrep; do
     command -v "$c" >/dev/null 2>&1 || missing+=("$c")
 done
 gsd_found=0
