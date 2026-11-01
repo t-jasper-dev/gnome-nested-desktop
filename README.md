@@ -39,16 +39,61 @@ Die Pakete können mit `./install-deps.sh` aus dem System installiert werden
 
 ## Installation
 
+### Schnellinstallation (curl oder wget)
+
+Eine Zeile im Terminal – es wird nur ein temporäres Archiv geladen, entpackt
+und `install.sh` gestartet. Das System selbst wird dabei nicht verändert.
+
 ```bash
+curl -fsSL https://raw.githubusercontent.com/t-jasper-dev/gnome-nested-desktop/main/get.sh | bash
+```
+
+Alternativ mit `wget`:
+
+```bash
+wget -qO- https://raw.githubusercontent.com/t-jasper-dev/gnome-nested-desktop/main/get.sh | bash
+```
+
+Optionen von `install.sh` lassen sich anhängen, z. B. ohne Steam-Artwork:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/t-jasper-dev/gnome-nested-desktop/main/get.sh | bash -s -- --skip-steam
+```
+
+Anderer Branch oder Tag:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/t-jasper-dev/gnome-nested-desktop/main/get.sh \
+  | GND_REF=main bash
+```
+
+`get.sh` benötigt `curl` **oder** `wget` und `tar`. Bei `curl | bash` ist stdin
+die Pipe; das Skript hängt stdin für `install.sh` an `/dev/tty`, damit `sudo`
+bei Bedarf nach einem Passwort fragen kann.
+
+Fehlen GNOME, `gnome-settings-daemon` oder das Portal noch komplett, vorher
+einmal die Systempakete nachziehen (braucht `sudo`):
+
+```bash
+git clone https://github.com/t-jasper-dev/gnome-nested-desktop.git
 cd gnome-nested-desktop
-
-# Nur wenn GNOME/gsd/Portal noch fehlen:
 ./install-deps.sh
+```
 
+Danach kann die Schnellinstallation oben laufen. Details zu den Paketen stehen
+unter „Andere Distributionen“.
+
+### Aus dem Checkout
+
+```bash
+git clone https://github.com/t-jasper-dev/gnome-nested-desktop.git
+cd gnome-nested-desktop
 ./install.sh
 ```
 
-Das Skript installiert ohne Root-Rechte:
+Alternativ genügt `./get.sh` im Checkout – es ruft dasselbe `install.sh` auf.
+
+`./install.sh` installiert ohne Root-Rechte:
 
 - `~/.local/bin/gnome-nested-desktop`
 - `~/.local/share/mutter-devkit/mutter-devkit` + Schema, falls noch nicht
