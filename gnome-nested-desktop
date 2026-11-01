@@ -16,10 +16,11 @@
 # GNOME_NESTED_BACKEND=wayland|x11, GNOME_NESTED_GAMESCOPE=1.
 #
 # --gamescope startet die Sitzung in einer eigenen gamescope-Instanz, falls noch
-# keine läuft. Das ist für Steam Link/Remote Play nötig: Steam kann nur X11-
-# Fenster aufnehmen, ein natives Wayland-Fenster scheitert mit
-# "PipewireRequired". In einer echten Gaming-Mode-Sitzung ist die Option ein
-# No-op, dort wird das vorhandene gamescope mitbenutzt.
+# keine läuft. In einer echten Gaming-Mode-Sitzung ist die Option ein No-op,
+# dort wird das vorhandene gamescope mitbenutzt. Für Steam Link/Remote Play muss
+# Steam selbst im Gaming Mode laufen: Im Desktop Mode erkennt Steam zwar die
+# verschachtelte gamescope-Instanz, nimmt aber ein internes Fenster statt des
+# sichtbaren auf, und der Client bleibt schwarz.
 #
 # Ohne --size wird im Gaming Mode die Auflösung von gamescopes Xwayland
 # übernommen (= das, was Steam/gamescope gerade ausgeben). Ohne --scale wird
@@ -69,8 +70,9 @@ Aufruf: gnome-nested-desktop [--size WxH] [--scale N|host|auto|steam]
   --scale auto   GNOME wählt die Skalierung selbst
   --scale steam  Faktor übernehmen, den Steam für seine eigene Oberfläche
                  benutzt (config.vdf), sonst aus der Auflösung abgeleitet
-  --gamescope    In einer eigenen gamescope-Instanz starten (für Steam Link).
-                 Ohne Wirkung, wenn bereits eine Gaming-Mode-Sitzung läuft.
+  --gamescope    In einer eigenen gamescope-Instanz starten (lokale Anzeige im
+                 Desktop Mode). Ohne Wirkung, wenn bereits eine Gaming-Mode-
+                 Sitzung läuft. Steam Link braucht Steam im Gaming Mode.
 EOF
 }
 
@@ -196,6 +198,15 @@ if [ "$GAMESCOPE_REQUEST" = 1 ] && ! in_gamescope; then
         [ -n "$SCALE_ARG" ] && child_args+=(--scale "$SCALE_ARG")
 
         echo "--- starte gamescope: ${gs_args[*]}${GS_SIZE:+ ($GS_SIZE)} -> $0 ${child_args[*]}" >&2
+        # Steam im Desktop Mode erkennt diese gamescope-Instanz, wählt für die
+        # Aufnahme aber ein internes 1x1-Fenster statt des sichtbaren
+        # gamescope-Fensters. Der Steam-Link-Client bleibt dann schwarz. Nur eine
+        # echte Gaming-Mode-Sitzung liefert Steam die richtige Aufnahmequelle.
+        if [ -n "$STEAM_APP" ]; then
+            echo "--- Hinweis: Steam im Desktop Mode nimmt die verschachtelte gamescope-Sitzung" >&2
+            echo "---          oft nicht auf (Steam Link bleibt schwarz). Für Streaming" >&2
+            echo "---          Steam im Gaming Mode starten; dort wird das vorhandene gamescope benutzt." >&2
+        fi
         export GNOME_NESTED_GAMESCOPE_CHILD=1
         exec gamescope "${gs_args[@]}" -- "$0" "${child_args[@]}"
     fi

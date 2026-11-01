@@ -1,9 +1,9 @@
 # gnome-nested-desktop
 
-Eine vollständige GNOME-Desktop-Sitzung als Steam-Shortcut – auch im Gaming Mode
-(gamescope), randlos in voller Auflösung. Der Shortcut startet die Sitzung
-automatisch in einer eigenen gamescope-Instanz, damit Steam Link/Remote Play sie
-übertragen kann.
+Eine vollständige GNOME-Desktop-Sitzung als Steam-Shortcut – im Gaming Mode
+(gamescope) randlos in voller Auflösung und für Steam Link/Remote Play
+übertragbar. Im Desktop Mode startet der Shortcut die Sitzung in einer eigenen
+gamescope-Instanz für die lokale Anzeige.
 
 GNOME 49+ hat den alten `--nested`-Modus entfernt. Dieses Projekt nutzt das
 offizielle **Mutter Devkit**: Eine eigene GNOME-Shell läuft in einer privaten
@@ -14,7 +14,9 @@ D-Bus-Session und wird über `mutter-devkit` in einem Fenster angezeigt.
 - Gaming Mode: Steam erkennt das Fenster über gamescopes Xwayland
   (`GDK_BACKEND=x11` nur für das Devkit-Fenster).
 - Startet aus Steam automatisch in einer eigenen gamescope-Instanz, wenn noch
-  keine Gaming-Mode-Sitzung läuft (nötig für Steam Link/Remote Play).
+  keine Gaming-Mode-Sitzung läuft (lokale Anzeige im Desktop Mode).
+- Steam Link/Remote Play: Steam im Gaming Mode starten, damit Steam die richtige
+  Aufnahmequelle erhält (siehe [Steam Link / Remote Play](#steam-link--remote-play)).
 - Randlos in der vollen Monitorauflösung (Auflösung aus gamescopes Xwayland,
   `--monitor-size`, `_NET_WM_STATE_FULLSCREEN`).
 - Skalierung standardmäßig wie in der laufenden GNOME-Sitzung; im Gaming Mode
@@ -190,11 +192,10 @@ Icon:          ~/.local/share/mutter-devkit/gnome-nested.png
 ```
 
 `--gamescope` startet die Sitzung in einer eigenen gamescope-Instanz, falls
-noch keine Gaming-Mode-Sitzung läuft. Das ist für Steam Link/Remote Play
-erforderlich: Steam kann auf dem Host nur X11-Fenster aufnehmen; ein natives
-Wayland-Fenster scheitert mit `k_ECaptureFailedReasonPipewireRequired`. In
-einer echten Gaming-Mode-Sitzung ist die Option wirkungslos, dort wird das
-vorhandene gamescope mitbenutzt (keine Verschachtelung).
+noch keine Gaming-Mode-Sitzung läuft. Im Desktop Mode dient das der lokalen
+Anzeige; für Steam Link/Remote Play muss Steam selbst im Gaming Mode laufen
+(siehe unten). In einer echten Gaming-Mode-Sitzung ist die Option wirkungslos,
+dort wird das vorhandene gamescope mitbenutzt (keine Verschachtelung).
 
 Der Eintrag landet in `~/.local/share/Steam/userdata/<ID>/config/shortcuts.vdf`.
 Die AppID wird deterministisch aus Zielpfad und Name berechnet; ein erneuter
@@ -234,11 +235,35 @@ Auf dem Host muss Remote Play aktiviert sein (Steam → Einstellungen → Remote
 Play → Remote Play aktivieren) und Steam angemeldet sein. Auf dem Client in
 der Bibliothek den Shortcut **GNOME (verschachtelt)** starten.
 
-Der Shortcut läuft mit `--gamescope`. Läuft Steam im Desktop Mode, startet der
-Wrapper selbst eine gamescope-Instanz mit SDL/X11-Ausgabe. Steam sieht dadurch
-ein normales X11-Fenster und kann es per XComposite aufnehmen; ohne gamescope
-bricht die Aufnahme mit `k_ECaptureFailedReasonPipewireRequired` ab. Läuft Steam
-bereits im Gaming Mode, wird das vorhandene gamescope verwendet.
+**Voraussetzung: Steam muss im Gaming Mode laufen.** Nur dort bekommt Steam die
+richtige Aufnahmequelle: Es erkennt die gamescope-Sitzung und nimmt das Fenster
+der verschachtelten Sitzung auf. Der Shortcut benutzt dann das vorhandene
+gamescope (keine zweite Instanz).
+
+Läuft Steam dagegen im Desktop Mode, erkennt Steam zwar die vom Shortcut
+gestartete gamescope-Instanz, wählt für die Aufnahme aber ein internes
+1×1-Fenster statt des sichtbaren Fensters. Das Bild am Steam-Link-Client bleibt
+dann schwarz, obwohl die Sitzung auf dem Host korrekt dargestellt wird.
+
+Steam im Gaming Mode starten, z. B. auf einer Textkonsole:
+
+```text
+steam -shutdown
+gamescope -f -- steam -gamepadui
+```
+
+Aus einer laufenden GNOME-Sitzung heraus geht dasselbe verschachtelt:
+
+```text
+steam -shutdown
+gamescope --backend sdl -f -e -- steam -gamepadui
+```
+
+Der Shortcut läuft mit `--gamescope`. In einer echten Gaming-Mode-Sitzung ist
+die Option wirkungslos. Im Desktop Mode startet der Wrapper damit eine eigene
+gamescope-Instanz mit SDL/X11-Ausgabe; das ist nur für die lokale Anzeige
+gedacht und ersetzt keine Gaming-Mode-Sitzung. Ohne gamescope bricht die
+Aufnahme mit `k_ECaptureFailedReasonPipewireRequired` ab.
 
 Die verschachtelte GNOME-Sitzung läuft unabhängig von der lokal angemeldeten
 Sitzung. Maus und Tastatur werden durchgereicht. Für einen Controller lässt
@@ -269,8 +294,9 @@ gnome-nested-desktop [--size WxH] [--scale N|host|auto|steam] [--gamescope]
   --scale auto    GNOME wählt selbst
   --scale steam   Faktor der Steam-Oberfläche
   --scale N       fester Faktor (wird auf unterstützte Stufen gerundet)
-  --gamescope     In einer eigenen gamescope-Instanz starten (Steam Link);
-                  ohne Wirkung, wenn bereits eine Gaming-Mode-Sitzung läuft
+  --gamescope     In einer eigenen gamescope-Instanz starten (lokale Anzeige im
+                  Desktop Mode); ohne Wirkung, wenn bereits eine Gaming-Mode-
+                  Sitzung läuft. Steam Link braucht Steam im Gaming Mode
 ```
 
 Ohne `--size` im Desktop Mode öffnet das Devkit sein Standardfenster.
@@ -296,8 +322,9 @@ Nützliche Zeilen:
   `gnome-shell --wayland --devkit`.
 - Mit `--gamescope` wird vorher eine eigene gamescope-Instanz gestartet
   (`--backend sdl -f`, unter Wayland mit `SDL_VIDEODRIVER=x11`). Das Fenster
-  ist damit ein X11-Fenster, das Steam in Desktop Mode aufnehmen kann. Läuft
-  bereits gamescope, entfällt dieser Schritt.
+  ist damit im Desktop Mode lokal sichtbar. Für Steam Link wählt Steam darin
+  aber ein internes Fenster als Aufnahmequelle, deshalb muss Steam im Gaming
+  Mode laufen. Läuft bereits gamescope, entfällt dieser Schritt.
 - Das Devkit-Fenster wird im Gaming Mode über gamescopes Xwayland als
   X11-Client gestartet, randlos auf die volle Auflösung gelegt und die
   Skalierung über `org.gnome.Mutter.DisplayConfig` gesetzt.

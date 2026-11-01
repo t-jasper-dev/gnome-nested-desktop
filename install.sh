@@ -119,6 +119,11 @@ if ! command -v gamescope >/dev/null 2>&1; then
     warn "Fenster; Steam Link/Remote Play kann die Sitzung so nicht aufnehmen."
     warn "Installation z. B. mit: sudo pacman -S gamescope  (oder dnf/apt)"
 fi
+if [ "$SKIP_STEAM" = 0 ] && command -v steam >/dev/null 2>&1; then
+    warn "Für Steam Link/Remote Play Steam im Gaming Mode starten. Im Desktop Mode"
+    warn "erkennt Steam die verschachtelte gamescope-Instanz, nimmt aber ein"
+    warn "internes Fenster auf – der Client bleibt schwarz."
+fi
 
 ensure_devkit_schema() {
     local schema="$MDK_DIR/schemas/org.gnome.mutter.devkit.gschema.xml"
@@ -400,9 +405,10 @@ Steam-Shortcut:
   Startoptionen: --gamescope
   Icon:          $MDK_DIR/gnome-nested.png
 
-  --gamescope startet die Sitzung in einer eigenen gamescope-Instanz, damit
-  Steam Link/Remote Play das Fenster aufnehmen kann. In einer echten
-  Gaming-Mode-Sitzung wird das vorhandene gamescope mitbenutzt.
+  --gamescope startet die Sitzung in einer eigenen gamescope-Instanz. Für
+  Steam Link/Remote Play muss Steam im Gaming Mode laufen; dort wird das
+  vorhandene gamescope mitbenutzt. Im Desktop Mode funktioniert das Fenster
+  lokal, Steam nimmt aber ein internes Fenster auf (Client bleibt schwarz).
   Für eine kleinere Stream-Auflösung z. B.: --gamescope --size 1920x1080 --scale 1
 
   Falls Steam beim Installieren lief und nicht beendet wurde:
