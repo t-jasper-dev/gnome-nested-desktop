@@ -216,6 +216,18 @@ Mode neu starten.
 Falls der automatische Eintrag nicht gewünscht ist, `--skip-shortcut`
 (Artwork bleibt) oder `--skip-steam` (beides aus) verwenden.
 
+## Steam Link / Remote Play
+
+Auf dem Host muss Remote Play aktiviert sein (Steam → Einstellungen → Remote
+Play → Remote Play aktivieren) und Steam angemeldet sein. Auf dem Client in
+der Bibliothek den Shortcut **GNOME (verschachtelt)** starten. Steam streamt
+das Devkit-Fenster; die verschachtelte GNOME-Sitzung läuft unabhängig von der
+lokal angemeldeten Sitzung.
+
+Maus und Tastatur werden durchgereicht. Für einen Controller lässt sich in den
+Steam-Einstellungen des Shortcuts ein Desktop-Layout zuweisen; die
+verschachtelte Sitzung selbst braucht dafür keine besondere Konfiguration.
+
 ## Benutzung
 
 ```text
