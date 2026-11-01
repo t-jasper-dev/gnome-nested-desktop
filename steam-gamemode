@@ -1,0 +1,70 @@
+#!/usr/bin/env bash
+# Startet Steam standardmäßig im Gaming Mode (gamescope/Big Picture).
+#
+# Hintergrund: Steam Link/Remote Play kann den verschachtelten Desktop nur
+# aufnehmen, wenn Steam selbst in einer gamescope-Sitzung läuft. Im Desktop
+# Mode wählt Steam ein internes gamescope-Fenster als Aufnahmequelle und der
+# Client bleibt schwarz.
+#
+# Läuft Steam bereits im Desktop Mode, wird nur die vorhandene Instanz
+# angesprochen. Für einen Wechsel in den Gaming Mode vorher beenden:
+#   steam -shutdown
+#
+# Umgebungsvariablen:
+#   STEAM_GAMEMODE_SIZE=1920x1080  Ausgabegröße von gamescope
+#   STEAM_BIN=...                  alternativer Steam-Befehl (für Tests)
+
+set -u
+
+STEAM_BIN="${STEAM_BIN:-steam}"
+
+if ! command -v "$STEAM_BIN" >/dev/null 2>&1; then
+    echo "steam-gamemode: Steam nicht gefunden: $STEAM_BIN" >&2
+    exit 1
+fi
+
+# Bereits in einer gamescope-Sitzung (echter Gaming Mode)? Dann nicht erneut
+# verschachteln, sondern Steam direkt starten.
+if [ -n "${GAMESCOPE_WAYLAND_DISPLAY:-}" ] || [ "${XDG_CURRENT_DESKTOP:-}" = gamescope ]; then
+    exec "$STEAM_BIN" "$@"
+fi
+
+# Steuerargumente wie -shutdown oder -ifrunning nicht in gamescope starten.
+case "${1:-}" in
+    -*) exec "$STEAM_BIN" "$@" ;;
+esac
+
+# Läuft Steam schon, nur die vorhandene Instanz ansprechen. Ein Wechsel in den
+# Gaming Mode setzt ein Beenden von Steam voraus.
+if pgrep -x steam >/dev/null 2>&1 || pgrep -f 'steamwebhelper' >/dev/null 2>&1; then
+    exec "$STEAM_BIN" "$@"
+fi
+
+if ! command -v gamescope >/dev/null 2>&1; then
+    echo "steam-gamemode: gamescope fehlt, starte Steam im Desktop Mode" >&2
+    exec "$STEAM_BIN" "$@"
+fi
+
+gs_args=()
+if [ -n "${DISPLAY:-}" ]; then
+    # Unter einer laufenden X11/Xwayland-Sitzung ein normales Fenster öffnen.
+    export SDL_VIDEODRIVER=x11
+    gs_args+=(--backend sdl)
+elif [ -n "${WAYLAND_DISPLAY:-}" ]; then
+    gs_args+=(--backend sdl)
+fi
+# -e aktiviert gamescopes Steam-Integration (Big Picture, Fokus, Overlay).
+gs_args+=(-f -e)
+
+# Ausgabegröße: explizit gesetzt oder die physische Auflösung der laufenden
+# X11-Sitzung. Ohne Angabe nutzt gamescope seine eigene Voreinstellung.
+gs_size="${STEAM_GAMEMODE_SIZE:-}"
+if [ -z "$gs_size" ] && [ -n "${DISPLAY:-}" ] && command -v xrandr >/dev/null 2>&1; then
+    gs_size=$(xrandr --current 2>/dev/null | awk '/\*/ {print $1; exit}')
+fi
+case "$gs_size" in
+    [0-9]*x[0-9]*) gs_args+=(-W "${gs_size%x*}" -H "${gs_size#*x}") ;;
+esac
+
+echo "--- steam-gamemode: gamescope ${gs_args[*]} -- $STEAM_BIN -gamepadui $*" >&2
+exec gamescope "${gs_args[@]}" -- "$STEAM_BIN" -gamepadui "$@"

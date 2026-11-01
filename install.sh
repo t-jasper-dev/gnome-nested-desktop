@@ -39,6 +39,7 @@ SKIP_STEAM=0
 SKIP_SHORTCUT=0
 RESTART_STEAM=0
 STEAM_WAS_RUNNING=0
+STEAM_GAMEMODE=1
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -62,7 +63,12 @@ Aufruf: ./install.sh [OPTIONEN]
   --skip-shortcut  Steam-Shortcut nicht anlegen/aktualisieren (Artwork wird
                    trotzdem installiert)
   --skip-devkit    mutter-devkit nicht prüfen/installieren
-  --skip-steam     Steam-Shortcut und Artwork nicht installieren
+  --skip-steam     Steam-Shortcut, Artwork und Gaming-Mode-Starter nicht
+                   installieren
+  --steam-gamemode Steam-Standardstarter im Gaming Mode starten (Standard)
+  --no-steam-gamemode
+                   Steam-Standardstarter nicht ersetzen bzw. vorhandenen
+                   Gaming-Mode-Starter entfernen
   -h, --help       Diese Hilfe anzeigen
 EOF
 }
@@ -94,6 +100,14 @@ while [ $# -gt 0 ]; do
             RESTART_STEAM=1
             shift
             ;;
+        --steam-gamemode)
+            STEAM_GAMEMODE=1
+            shift
+            ;;
+        --no-steam-gamemode)
+            STEAM_GAMEMODE=0
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -105,6 +119,7 @@ while [ $# -gt 0 ]; do
 done
 
 [ -f "$PROJECT_DIR/gnome-nested-desktop" ] || die "Wrapper fehlt: $PROJECT_DIR/gnome-nested-desktop"
+[ -f "$PROJECT_DIR/steam-gamemode" ] || die "steam-gamemode fehlt: $PROJECT_DIR/steam-gamemode"
 [ -f "$PROJECT_DIR/steam-shortcut.py" ] || die "steam-shortcut.py fehlt: $PROJECT_DIR/steam-shortcut.py"
 [ -d "$ASSET_DIR" ] || die "Assets fehlen: $ASSET_DIR"
 
@@ -119,10 +134,10 @@ if ! command -v gamescope >/dev/null 2>&1; then
     warn "Fenster; Steam Link/Remote Play kann die Sitzung so nicht aufnehmen."
     warn "Installation z. B. mit: sudo pacman -S gamescope  (oder dnf/apt)"
 fi
-if [ "$SKIP_STEAM" = 0 ] && command -v steam >/dev/null 2>&1; then
-    warn "Für Steam Link/Remote Play Steam im Gaming Mode starten. Im Desktop Mode"
-    warn "erkennt Steam die verschachtelte gamescope-Instanz, nimmt aber ein"
-    warn "internes Fenster auf – der Client bleibt schwarz."
+if [ "$SKIP_STEAM" = 0 ] && [ "$STEAM_GAMEMODE" = 0 ] && command -v steam >/dev/null 2>&1; then
+    warn "Der Steam-Standardstarter bleibt im Desktop Mode. Für Steam Link/Remote"
+    warn "Play muss Steam im Gaming Mode laufen, sonst nimmt Steam ein internes"
+    warn "Fenster auf und der Client bleibt schwarz."
 fi
 
 ensure_devkit_schema() {
@@ -301,11 +316,78 @@ prepare_steam_write() {
 restart_steam_if_needed() {
     [ "$STEAM_WAS_RUNNING" = 1 ] || return 0
     say "Starte Steam neu"
-    if command -v setsid >/dev/null 2>&1; then
-        setsid steam >/dev/null 2>&1 </dev/null &
-    else
-        nohup steam >/dev/null 2>&1 </dev/null &
+    local launcher=steam
+    if [ "$STEAM_GAMEMODE" = 1 ] && [ -x "$BIN_DIR/steam-gamemode" ]; then
+        launcher="$BIN_DIR/steam-gamemode"
     fi
+    if command -v setsid >/dev/null 2>&1; then
+        setsid "$launcher" >/dev/null 2>&1 </dev/null &
+    else
+        nohup "$launcher" >/dev/null 2>&1 </dev/null &
+    fi
+}
+
+install_steam_gamemode() {
+    [ "$SKIP_STEAM" = 1 ] && { say "Steam-Gaming-Mode-Starter übersprungen"; return; }
+
+    local dst="$APP_DIR/steam.desktop"
+    if [ "$STEAM_GAMEMODE" = 0 ]; then
+        if [ -f "$dst" ] && grep -q "$BIN_DIR/steam-gamemode" "$dst" 2>/dev/null; then
+            say "Entferne Steam-Gaming-Mode-Starter"
+            backup "$dst"
+            rm -f "$dst"
+            update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+        fi
+        return
+    fi
+
+    if ! command -v steam >/dev/null 2>&1; then
+        warn "Steam nicht gefunden, Gaming-Mode-Starter wird nicht eingerichtet"
+        return
+    fi
+
+    say "Installiere Steam-Gaming-Mode-Starter"
+    install -d "$BIN_DIR"
+    backup "$BIN_DIR/steam-gamemode"
+    install -m755 "$PROJECT_DIR/steam-gamemode" "$BIN_DIR/steam-gamemode"
+
+    # Den systemweiten Steam-Eintrag als benutzerspezifische Kopie überschreiben
+    # und nur den Programmaufruf ersetzen. Aktionen wie "Store" oder "Library"
+    # behalten ihre Argumente und laufen ebenfalls über den Starter.
+    local src=/usr/share/applications/steam.desktop
+    install -d "$APP_DIR"
+    backup "$dst"
+    if [ -f "$src" ]; then
+        python3 - "$src" "$dst" "$BIN_DIR/steam-gamemode" <<'PY'
+import re
+import sys
+
+src, dst, launcher = sys.argv[1:]
+text = open(src, encoding="utf-8").read()
+text = re.sub(
+    r"(?m)^Exec=(?:/usr/bin/|/usr/local/bin/)?steam(?=\s|$)",
+    lambda _match: f"Exec={launcher}",
+    text,
+)
+with open(dst, "w", encoding="utf-8") as f:
+    f.write(text)
+PY
+    else
+        cat >"$dst" <<EOF
+[Desktop Entry]
+Name=Steam
+Comment=Steam im Gaming Mode (gamescope)
+Exec=$BIN_DIR/steam-gamemode %U
+Icon=steam
+Terminal=false
+Type=Application
+Categories=Network;FileTransfer;Game;
+MimeType=x-scheme-handler/steam;x-scheme-handler/steamlink;
+EOF
+    fi
+    chmod 644 "$dst"
+    update-desktop-database "$APP_DIR" >/dev/null 2>&1 || true
+    say "Steam-Standardstarter -> $BIN_DIR/steam-gamemode"
 }
 
 install_steam_shortcut() {
@@ -386,6 +468,7 @@ install_steam_art() {
     fi
 }
 
+install_steam_gamemode
 install_steam_shortcut
 install_steam_art
 restart_steam_if_needed
@@ -422,3 +505,16 @@ Skalierung:
 Hinweis: Die Einstellungen-, Bluetooth-, Theme- und Skalierungsfixes sind
 im Wrapper enthalten. Details stehen in der README.md.
 EOF
+
+if [ "$SKIP_STEAM" = 0 ] && [ "$STEAM_GAMEMODE" = 1 ] && [ -x "$BIN_DIR/steam-gamemode" ]; then
+    cat <<EOF
+
+Steam-Starter:
+  Der normale Steam-Eintrag startet im Gaming Mode (Big Picture/gamescope):
+    $BIN_DIR/steam-gamemode
+  Desktop-Eintrag: $APP_DIR/steam.desktop
+  Läuft Steam bereits im Desktop Mode, wird es nicht automatisch beendet.
+  Zum Wechsel: steam -shutdown, danach Steam neu starten.
+  Abschalten: ./install.sh --no-steam-gamemode
+EOF
+fi

@@ -30,6 +30,9 @@ D-Bus-Session und wird über `mutter-devkit` in einem Fenster angezeigt.
 - Key-Up-Cleanup gegen hängende Pfeiltasten nach dem Start aus gamescope.
 - Legt den Steam-Shortcut automatisch an (`shortcuts.vdf`) und installiert das
   Artwork (Grid, Hero, Logo, Header) sowie das App-Icon.
+- Ersetzt den normalen Steam-Starter standardmäßig durch `steam-gamemode`, damit
+  Steam Link die Sitzung aufnehmen kann (abschaltbar mit
+  `--no-steam-gamemode`).
 
 ## Voraussetzungen
 
@@ -229,6 +232,33 @@ Mode neu starten.
 Falls der automatische Eintrag nicht gewünscht ist, `--skip-shortcut`
 (Artwork bleibt) oder `--skip-steam` (beides aus) verwenden.
 
+## Steam standardmäßig im Gaming Mode
+
+`install.sh` installiert `~/.local/bin/steam-gamemode` und legt damit einen
+benutzerspezifischen Steam-Eintrag unter
+`~/.local/share/applications/steam.desktop` an. Der normale Steam-Starter
+startet dadurch Big Picture in einer gamescope-Sitzung. Das ist die
+Voraussetzung dafür, dass Steam Link den verschachtelten Desktop aufnehmen
+kann.
+
+- Läuft Steam bereits, wird nur die vorhandene Instanz geöffnet. Für den
+  Wechsel in den Gaming Mode Steam vorher beenden: `steam -shutdown`, danach
+  Steam neu starten.
+- In einer echten Gaming-Mode-Sitzung erkennt der Starter das vorhandene
+  gamescope und startet Steam ohne weitere Verschachtelung.
+- Ohne gamescope startet Steam normal im Desktop Mode.
+- Abschalten und den systemweiten Eintrag wiederherstellen:
+  `./install.sh --no-steam-gamemode`
+- Kleinere Ausgabegröße fürs Streaming:
+  `STEAM_GAMEMODE_SIZE=1920x1080 steam-gamemode`
+
+Der Starter lässt sich auch direkt aufrufen:
+
+```text
+steam-gamemode
+steam-gamemode steam://open/bigpicture
+```
+
 ## Steam Link / Remote Play
 
 Auf dem Host muss Remote Play aktiviert sein (Steam → Einstellungen → Remote
@@ -238,7 +268,9 @@ der Bibliothek den Shortcut **GNOME (verschachtelt)** starten.
 **Voraussetzung: Steam muss im Gaming Mode laufen.** Nur dort bekommt Steam die
 richtige Aufnahmequelle: Es erkennt die gamescope-Sitzung und nimmt das Fenster
 der verschachtelten Sitzung auf. Der Shortcut benutzt dann das vorhandene
-gamescope (keine zweite Instanz).
+gamescope (keine zweite Instanz). Der mitinstallierte Steam-Starter
+(`steam-gamemode`) erledigt das standardmäßig; siehe
+[Steam standardmäßig im Gaming Mode](#steam-standardmäßig-im-gaming-mode).
 
 Läuft Steam dagegen im Desktop Mode, erkennt Steam zwar die vom Shortcut
 gestartete gamescope-Instanz, wählt für die Aufnahme aber ein internes
