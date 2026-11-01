@@ -1,0 +1,154 @@
+#!/usr/bin/env bash
+# Echte gamescope-Session für GDM.
+#
+# Startet gamescope im DRM-Modus, darin Steam im Gaming Mode und automatisch
+# den Shortcut "GNOME (verschachtelt)". Es gibt keine äußere GNOME-Sitzung;
+# die verschachtelte GNOME-Shell ist das sichtbare Desktop-System.
+#
+# Wird von /usr/share/wayland-sessions/steam-nested.desktop gestartet.
+#
+# Aufruf:
+#   steam-nested-session            Session starten
+#   steam-nested-session --check    Abhängigkeiten/Konfiguration prüfen
+#
+# Rückweg: setup-gamescope-session.sh --remove (auch aus einer TTY).
+
+set -u
+
+PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin${PATH:+:$PATH}"
+export PATH
+export XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
+export XDG_CURRENT_DESKTOP=gamescope
+export XDG_SESSION_DESKTOP=gamescope
+export XDG_SESSION_TYPE=wayland
+export DESKTOP_SESSION=gamescope
+
+# Kein Fenster in einem anderen Compositor: gamescope übernimmt DRM.
+unset DISPLAY WAYLAND_DISPLAY SDL_VIDEODRIVER
+
+CONFIG_DIR="${XDG_CONFIG_HOME:-$HOME/.config}/gnome-nested-desktop"
+ENV_FILE="$CONFIG_DIR/session.env"
+FAIL_MARKER="$CONFIG_DIR/session-failed"
+LOG="${XDG_RUNTIME_DIR}/steam-nested-session.log"
+
+log() { printf '%s %s\n' "$(date -Is)" "$*"; }
+die() { log "FEHLER: $*" >&2; exit 1; }
+
+check() {
+    local ok=0
+    command -v gamescope >/dev/null 2>&1 || { echo "gamescope fehlt"; ok=1; }
+    command -v steam >/dev/null 2>&1 || { echo "steam fehlt"; ok=1; }
+    [ -x "$HOME/.local/bin/gnome-nested-desktop" ] || { echo "gnome-nested-desktop fehlt"; ok=1; }
+    [ -r "$ENV_FILE" ] || { echo "session.env fehlt: $ENV_FILE"; ok=1; }
+    if [ -r "$ENV_FILE" ]; then
+        # shellcheck disable=SC1090
+        . "$ENV_FILE"
+        [ -n "${GAMEID:-}" ] || { echo "GAMEID fehlt in $ENV_FILE"; ok=1; }
+    fi
+    [ "$ok" = 0 ] || return 1
+    echo "OK: gamescope, steam, Wrapper, GAMEID=${GAMEID:-?}"
+    echo "Start: gamescope --backend drm -f -e -- steam -gamepadui steam://rungameid/$GAMEID"
+}
+
+if [ "${1:-}" = "--check" ]; then
+    check
+    exit $?
+fi
+
+mkdir -p "$(dirname "$LOG")" 2>/dev/null || true
+: >>"$LOG" 2>/dev/null || LOG="/tmp/steam-nested-session.log"
+exec >>"$LOG" 2>&1
+
+log "=== steam-nested-session startet"
+
+command -v gamescope >/dev/null 2>&1 || die "gamescope nicht gefunden"
+command -v steam >/dev/null 2>&1 || die "steam nicht gefunden"
+[ -x "$HOME/.local/bin/gnome-nested-desktop" ] || die "gnome-nested-desktop fehlt"
+[ -r "$ENV_FILE" ] || die "session.env fehlt: $ENV_FILE"
+# shellcheck disable=SC1090
+. "$ENV_FILE"
+[ -n "${GAMEID:-}" ] || die "GAMEID fehlt in $ENV_FILE"
+
+# Nach drei schnellen Fehlstarts nicht in eine Autologin-Schleife laufen.
+# Die Session bleibt dann stehen; Rückweg über eine TTY:
+#   setup-gamescope-session.sh --remove
+if [ -e "$FAIL_MARKER" ]; then
+    log "Session ist zuletzt fehlgeschlagen ($FAIL_MARKER)."
+    log "Entferne die Datei oder führe setup-gamescope-session.sh --remove aus."
+    sleep 3600
+    exit 1
+fi
+
+gs_pid=
+stopping=0
+cleanup() {
+    stopping=1
+    [ -n "$gs_pid" ] && kill "$gs_pid" 2>/dev/null
+}
+trap cleanup INT TERM HUP
+
+failures=0
+while :; do
+    [ "$stopping" = 1 ] && break
+
+    start=$(date +%s)
+    log "starte gamescope (Versuch $((failures + 1)))"
+    gamescope --backend drm -f -e -- bash -c '
+        gameid="$1"
+        steam -gamepadui &
+        steam_pid=$!
+        trap "kill \"$steam_pid\" 2>/dev/null" TERM INT HUP
+
+        # Warten, bis Steam läuft und seinen IPC-Pipe angelegt hat.
+        for _ in $(seq 1 120); do
+            if [ -S "$HOME/.steam/steam.pipe" ] && pgrep -x steam >/dev/null 2>&1; then
+                break
+            fi
+            kill -0 "$steam_pid" 2>/dev/null || exit 1
+            sleep 1
+        done
+
+        # Steam braucht nach dem Pipe-Aufbau noch einen Moment für die UI.
+        sleep 5
+        echo "--- $(date -Is) starte Shortcut $gameid"
+        steam "steam://rungameid/$gameid" >/dev/null 2>&1 || \
+            echo "--- $(date -Is) Shortcut-Start fehlgeschlagen" >&2
+
+        wait "$steam_pid"
+    ' bash "$GAMEID" &
+    gs_pid=$!
+
+    wait "$gs_pid"
+    status=$?
+    gs_pid=
+    duration=$(( $(date +%s) - start ))
+    log "gamescope beendet (exit=$status, ${duration}s)"
+
+    [ "$stopping" = 1 ] && break
+
+    # Falls Steam gamescope überlebt hat, vor dem Neustart beenden.
+    if pgrep -x steam >/dev/null 2>&1; then
+        log "Beende übrig gebliebenes Steam"
+        steam -shutdown >/dev/null 2>&1 || true
+        sleep 2
+    fi
+
+    # Schnelle Fehlstarts nicht endlos wiederholen.
+    if [ "$duration" -lt 10 ]; then
+        failures=$((failures + 1))
+        if [ "$failures" -ge 3 ]; then
+            : >"$FAIL_MARKER"
+            die "gamescope ist dreimal kurz hintereinander fehlgeschlagen"
+        fi
+    else
+        failures=0
+        rm -f "$FAIL_MARKER"
+    fi
+
+    # Bei Autologin verhindert der Neustart, dass GDM sofort wieder einloggt.
+    # Zum dauerhaften Verlassen: setup-gamescope-session.sh --remove (TTY).
+    log "Neustart in 5 s"
+    sleep 5
+done
+
+log "=== steam-nested-session beendet"

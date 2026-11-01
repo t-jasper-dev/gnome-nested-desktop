@@ -40,6 +40,9 @@ SKIP_SHORTCUT=0
 RESTART_STEAM=0
 STEAM_WAS_RUNNING=0
 STEAM_GAMEMODE=1
+GAMESCOPE_SESSION=0
+REMOVE_GAMESCOPE_SESSION=0
+AUTOLOGIN=0
 
 say()  { printf '\n\033[1m==> %s\033[0m\n' "$*"; }
 warn() { printf '\033[1;33mWARN:\033[0m %s\n' "$*" >&2; }
@@ -69,6 +72,13 @@ Aufruf: ./install.sh [OPTIONEN]
   --no-steam-gamemode
                    Steam-Standardstarter nicht ersetzen bzw. vorhandenen
                    Gaming-Mode-Starter entfernen
+  --gamescope-session
+                   Echte gamescope-Session für GDM einrichten (bootet direkt
+                   in die verschachtelte GNOME-Sitzung, braucht sudo)
+  --no-gamescope-session
+                   Eingerichtete gamescope-Session wieder entfernen
+  --autologin      GDM-Autologin für den aktuellen Benutzer aktivieren
+                   (nur zusammen mit --gamescope-session)
   -h, --help       Diese Hilfe anzeigen
 EOF
 }
@@ -108,6 +118,18 @@ while [ $# -gt 0 ]; do
             STEAM_GAMEMODE=0
             shift
             ;;
+        --gamescope-session)
+            GAMESCOPE_SESSION=1
+            shift
+            ;;
+        --no-gamescope-session)
+            REMOVE_GAMESCOPE_SESSION=1
+            shift
+            ;;
+        --autologin)
+            AUTOLOGIN=1
+            shift
+            ;;
         -h|--help)
             usage
             exit 0
@@ -120,6 +142,8 @@ done
 
 [ -f "$PROJECT_DIR/gnome-nested-desktop" ] || die "Wrapper fehlt: $PROJECT_DIR/gnome-nested-desktop"
 [ -f "$PROJECT_DIR/steam-gamemode" ] || die "steam-gamemode fehlt: $PROJECT_DIR/steam-gamemode"
+[ -f "$PROJECT_DIR/steam-nested-session" ] || die "steam-nested-session fehlt: $PROJECT_DIR/steam-nested-session"
+[ -f "$PROJECT_DIR/setup-gamescope-session.sh" ] || die "setup-gamescope-session.sh fehlt: $PROJECT_DIR/setup-gamescope-session.sh"
 [ -f "$PROJECT_DIR/steam-shortcut.py" ] || die "steam-shortcut.py fehlt: $PROJECT_DIR/steam-shortcut.py"
 [ -d "$ASSET_DIR" ] || die "Assets fehlen: $ASSET_DIR"
 
@@ -473,6 +497,19 @@ install_steam_shortcut
 install_steam_art
 restart_steam_if_needed
 
+if [ "$REMOVE_GAMESCOPE_SESSION" = 1 ]; then
+    say "Entferne echte gamescope-Session"
+    "$PROJECT_DIR/setup-gamescope-session.sh" --remove
+elif [ "$GAMESCOPE_SESSION" = 1 ]; then
+    if [ "$SKIP_STEAM" = 1 ] || [ "$SKIP_SHORTCUT" = 1 ]; then
+        warn "Ohne Steam-Shortcut startet die gamescope-Session nur Steam Big Picture."
+    fi
+    say "Richte echte gamescope-Session ein"
+    setup_args=()
+    [ "$AUTOLOGIN" = 1 ] && setup_args+=(--autologin)
+    "$PROJECT_DIR/setup-gamescope-session.sh" "${setup_args[@]}"
+fi
+
 say "Fertig"
 cat <<EOF
 
@@ -518,5 +555,18 @@ Steam-Starter:
   Der Starter aktiviert das gamescope-Fenster, damit die Tastatur am PC
   (Shift+Tab fürs Steam-Overlay) bei Steam ankommt.
   Abschalten: ./install.sh --no-steam-gamemode
+EOF
+fi
+
+if [ "$GAMESCOPE_SESSION" = 1 ] && [ "$REMOVE_GAMESCOPE_SESSION" = 0 ]; then
+    cat <<EOF
+
+Echte gamescope-Session:
+  GDM startet beim nächsten Boot direkt:
+    gamescope (DRM) -> Steam Gaming Mode -> Shortcut "GNOME (verschachtelt)"
+  Session:        /usr/share/wayland-sessions/steam-nested.desktop
+  Session-Skript: $BIN_DIR/steam-nested-session
+  Autologin:      $([ "$AUTOLOGIN" = 1 ] && echo "aktiviert für $USER" || echo "nicht aktiviert")
+  Rückweg (auch per TTY): ./setup-gamescope-session.sh --remove
 EOF
 fi

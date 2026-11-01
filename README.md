@@ -33,6 +33,8 @@ D-Bus-Session und wird über `mutter-devkit` in einem Fenster angezeigt.
 - Ersetzt den normalen Steam-Starter standardmäßig durch `steam-gamemode`, damit
   Steam Link die Sitzung aufnehmen kann (abschaltbar mit
   `--no-steam-gamemode`).
+- Optional echte gamescope-Session: GDM bootet mit `--gamescope-session` direkt
+  in die verschachtelte GNOME-Sitzung, ohne äußeres GNOME.
 
 ## Voraussetzungen
 
@@ -263,6 +265,85 @@ Der Starter lässt sich auch direkt aufrufen:
 steam-gamemode
 steam-gamemode steam://open/bigpicture
 ```
+
+## Echte gamescope-Session (Boot direkt in die verschachtelte Sitzung)
+
+Statt GNOME zu starten und Steam per Autostart in ein gamescope-Fenster zu
+legen, kann GDM direkt eine echte gamescope-Session starten:
+
+```text
+GDM (Autologin)
+  → /usr/share/wayland-sessions/steam-nested.desktop
+  → ~/.local/bin/steam-nested-session
+  → gamescope (DRM) + Steam Gaming Mode
+  → Shortcut "GNOME (verschachtelt)"
+  → verschachtelte GNOME-Sitzung fullscreen
+```
+
+Es gibt dabei keine äußere GNOME-Sitzung. Die verschachtelte GNOME-Shell ist
+das sichtbare System; Steam läuft als Gaming-Mode-Session darunter.
+
+Einrichten:
+
+```bash
+./install.sh --gamescope-session --autologin
+```
+
+Ohne Autologin (Session muss im GDM ausgewählt werden):
+
+```bash
+./install.sh --gamescope-session
+```
+
+Das Setup legt an:
+
+```text
+/usr/share/wayland-sessions/steam-nested.desktop   (systemweit, sudo)
+~/.local/bin/steam-nested-session                  (Session-Skript)
+~/.config/gnome-nested-desktop/session.env         (AppID/GameID)
+```
+
+Zusätzlich wird die AccountsService-Session auf `steam-nested` gesetzt und –
+mit `--autologin` – GDM-Autologin in `/etc/gdm/custom.conf` aktiviert. GDM
+wird dabei nicht automatisch neu gestartet.
+
+Nach dem nächsten Boot startet die Session automatisch. Wird Steam beendet,
+startet das Session-Skript es nach 5 Sekunden neu; das verhindert eine
+Autologin-Schleife. Nach drei schnellen Fehlstarts bleibt die Session mit einer
+Markierung `~/.config/gnome-nested-desktop/session-failed` stehen, statt in
+einer Login-Schleife zu landen. Zum dauerhaften Verlassen:
+
+```bash
+./setup-gamescope-session.sh --remove
+sudo systemctl restart gdm
+```
+
+Aus einer Textkonsole (z. B. `Ctrl+Alt+F2`) funktioniert derselbe Befehl mit
+absolutem Pfad:
+
+```bash
+/home/tobias/Projekte/gnome-nested-desktop/setup-gamescope-session.sh --remove
+```
+
+Danach ist die normale GNOME-Session wieder der Standard. Die Session-Datei
+bleibt als Backup erhalten; die aktuelle GNOME-Session wird nicht beendet.
+
+Logs:
+
+```text
+/run/user/$UID/steam-nested-session.log
+/run/user/$UID/gnome-nested-desktop.log
+```
+
+Hinweise:
+
+- Autologin entsperrt die Sitzung ohne Passwort.
+- Der GNOME-Keyring ist bei Autologin eventuell nicht entsperrt; Steam
+  `AutoLogin=1` sollte trotzdem funktionieren, muss aber getestet werden.
+- Die echte gamescope-Session braucht `sudo` für die Session-Datei, die
+  AccountsService-Session und optional GDM-Autologin.
+- `steam-gamemode` bleibt für den Desktop Mode erhalten und wird für diese
+  Session nicht benötigt.
 
 ## Steam Link / Remote Play
 
